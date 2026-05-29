@@ -1,15 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { estimateCost, mapUrls, result } from "@/lib/fal";
-import { buildUEMaps, seamlessResizePng, type RawMaps } from "@/lib/pbr";
-import { upscaleBaseColor, upscaleClarity } from "@/lib/replicate";
+import { buildUEMaps, extractOpacity, seamlessResizePng, type RawMaps } from "@/lib/pbr";
+import { removeBackground, upscaleBaseColor, upscaleClarity } from "@/lib/replicate";
 import { buildManifest, buildZip, slugify } from "@/lib/ue";
 import { newJobId } from "@/lib/jobs";
 import { storeOutput } from "@/lib/storage";
 import type { GenerateOptions, ProcessedSet } from "@/lib/types";
 
 export const runtime = "nodejs";
-// 60s = Vercel Hobby cap. Heavy 8K + AI-upscale runs may need Pro (up to 300s).
-export const maxDuration = 60;
+// Pro plan: up to 300s. Heavy 8K + AI upscale + bg-removal can take minutes.
+export const maxDuration = 300;
 
 type Body = { requestId: string; options: GenerateOptions & { name?: string } };
 
@@ -74,10 +74,21 @@ export async function POST(req: NextRequest) {
       compress: options.compress,
     });
 
+    // Optional opacity/alpha map: background-remove the base color, take its alpha.
+    let opacityBuf: Buffer | undefined;
+    if (options.opacity && replicateKey && raw.basecolor) {
+      try {
+        const rgba = await removeBackground(replicateKey, raw.basecolor);
+        opacityBuf = await extractOpacity(rgba, options.resolution);
+      } catch (e) {
+        console.error("opacity (bg-removal) failed; skipping:", e);
+      }
+    }
+
     const ext = ueMaps.baseColorExt;
     const bcFile = `T_${name}_BC.${ext}`;
-    const manifest = buildManifest(name, options.material, options.resolution, patina.seed, ext);
-    const zip = await buildZip(name, ueMaps, manifest, ext);
+    const manifest = buildManifest(name, options.material, options.resolution, patina.seed, ext, !!opacityBuf);
+    const zip = await buildZip(name, ueMaps, manifest, ext, opacityBuf);
 
     const jobId = newJobId(name);
     const [baseColor, normal, orm, height, zipUrl] = await Promise.all([
@@ -87,6 +98,9 @@ export async function POST(req: NextRequest) {
       storeOutput(jobId, `T_${name}_H.png`, ueMaps.height, "image/png"),
       storeOutput(jobId, `${name}_UE.zip`, zip, "application/zip"),
     ]);
+    const opacity = opacityBuf
+      ? await storeOutput(jobId, `T_${name}_O.png`, opacityBuf, "image/png")
+      : undefined;
 
     const processed: ProcessedSet = {
       name,
@@ -94,7 +108,7 @@ export async function POST(req: NextRequest) {
       resolution: options.resolution,
       costEstimate: estimateCost(options.resolution),
       zipBytes: zip.length,
-      urls: { baseColor, normal, orm, height, zip: zipUrl },
+      urls: { baseColor, normal, orm, height, zip: zipUrl, ...(opacity ? { opacity } : {}) },
       manifest,
     };
     return NextResponse.json(processed);

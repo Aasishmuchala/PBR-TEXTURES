@@ -3,7 +3,7 @@ import { submit, uploadImage } from "@/lib/fal";
 import type { GenerateOptions } from "@/lib/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 export async function POST(req: NextRequest) {
   const key = req.headers.get("x-fal-key") || process.env.FAL_KEY || "";

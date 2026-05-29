@@ -12,30 +12,41 @@ export function buildManifest(
   resolution: number,
   seed?: number | null,
   baseColorExt: "png" | "jpg" = "png",
+  hasOpacity = false,
 ) {
-  return {
+  const m: Record<string, unknown> = {
     name,
     material_label: material,
     resolution,
     normal_convention: "DirectX (UE-ready)",
+    blend_mode: hasOpacity ? "Masked" : "Opaque",
     files: {
       base_color: `T_${name}_BC.${baseColorExt}`,
       normal: `T_${name}_N.png`,
       orm: `T_${name}_ORM.png`,
       height: `T_${name}_H.png`,
-    },
+    } as Record<string, string>,
     ue_import: {
       [`T_${name}_BC`]: { srgb: true, compression: "TC_Default" },
       [`T_${name}_N`]: { srgb: false, compression: "TC_Normalmap", flip_green: false, note: "already DirectX" },
       [`T_${name}_ORM`]: { srgb: false, compression: "TC_Masks", channels: "R=AO G=Roughness B=Metallic" },
-      [`T_${name}_H`]: { srgb: false, compression: "TC_Grayscale", note: "16-bit container in core-proof; tessellation/Nanite displacement" },
-    },
+      [`T_${name}_H`]: { srgb: false, compression: "TC_Grayscale", note: "tessellation/Nanite displacement" },
+    } as Record<string, unknown>,
     fal_seed: seed ?? null,
     generated_by: "TextureForge",
   };
+  if (hasOpacity) {
+    (m.files as Record<string, string>).opacity = `T_${name}_O.png`;
+    (m.ue_import as Record<string, unknown>)[`T_${name}_O`] = {
+      srgb: false,
+      compression: "TC_Grayscale",
+      note: "Opacity Mask — material Blend Mode set to Masked",
+    };
+  }
+  return m;
 }
 
-export function importRecipe(name: string): string {
+export function importRecipe(name: string, hasOpacity = false): string {
   return `# UE5 import recipe — ${name}
 
 Two ways into Unreal Engine 5:
@@ -51,9 +62,9 @@ Import the PNGs, then set per texture:
 | T_${name}_BC  | ON  | Default   | base color |
 | T_${name}_N   | OFF | Normalmap | already DirectX — leave Flip Green OFF |
 | T_${name}_ORM | OFF | Masks     | R=AO, G=Roughness, B=Metallic |
-| T_${name}_H   | OFF | Grayscale | tessellation / Nanite displacement |
+| T_${name}_H   | OFF | Grayscale | tessellation / Nanite displacement |${hasOpacity ? `\n| T_${name}_O   | OFF | Grayscale | Opacity Mask — set material Blend Mode = Masked |` : ""}
 
-Wiring: BC.RGB -> Base Color · N.RGB -> Normal · ORM.R -> AO · ORM.G -> Roughness · ORM.B -> Metallic · H -> displacement.
+Wiring: BC.RGB -> Base Color · N.RGB -> Normal · ORM.R -> AO · ORM.G -> Roughness · ORM.B -> Metallic · H -> displacement${hasOpacity ? " · O -> Opacity Mask (set Blend Mode = Masked)" : ""}.
 
 ### Gotchas
 1. ORM/Normal must be sRGB OFF or lighting goes wrong.
@@ -150,6 +161,13 @@ def build_material(name, textures):
         mel.connect_material_property(orm, "R", MP.MP_AMBIENT_OCCLUSION)
         mel.connect_material_property(orm, "G", MP.MP_ROUGHNESS)
         mel.connect_material_property(orm, "B", MP.MP_METALLIC)
+    if textures.get("opacity"):
+        op = sampler(textures["opacity"], -480, 720, ST.SAMPLERTYPE_LINEAR_GRAYSCALE, "Opacity")
+        mel.connect_material_property(op, "R", MP.MP_OPACITY_MASK)
+        try:
+            mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_MASKED)
+        except Exception:
+            pass
 
     mel.recompile_material(mat)
     unreal.EditorAssetLibrary.save_asset(mat_path)
@@ -184,6 +202,9 @@ def main():
     imported["orm"] = import_texture(os.path.join(folder, files["orm"]), "T_{0}_ORM".format(name), s, c)
     s, c = setting("T_{0}_H".format(name), False, "TC_Grayscale")
     import_texture(os.path.join(folder, files["height"]), "T_{0}_H".format(name), s, c)
+    if files.get("opacity"):
+        s, c = setting("T_{0}_O".format(name), False, "TC_Grayscale")
+        imported["opacity"] = import_texture(os.path.join(folder, files["opacity"]), "T_{0}_O".format(name), s, c)
 
     try:
         build_material(name, imported)
@@ -201,14 +222,16 @@ export async function buildZip(
   files: UEMaps,
   manifest: unknown,
   baseColorExt: "png" | "jpg" = "png",
+  opacity?: Buffer,
 ): Promise<Buffer> {
   const zip = new JSZip();
   zip.file(`T_${name}_BC.${baseColorExt}`, files.baseColor);
   zip.file(`T_${name}_N.png`, files.normal);
   zip.file(`T_${name}_ORM.png`, files.orm);
   zip.file(`T_${name}_H.png`, files.height);
+  if (opacity) zip.file(`T_${name}_O.png`, opacity);
   zip.file("manifest.json", JSON.stringify(manifest, null, 2));
   zip.file("ue_import.py", UE_IMPORT_SCRIPT);
-  zip.file("IMPORT_RECIPE.md", importRecipe(name));
+  zip.file("IMPORT_RECIPE.md", importRecipe(name, !!opacity));
   return zip.generateAsync({ type: "nodebuffer" }) as Promise<Buffer>;
 }

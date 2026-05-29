@@ -42,7 +42,21 @@ const DEFAULT_OPTIONS: GenerateOptions = {
   aiUpscale: false,
   upscaler: "clarity",
   compress: false,
+  opacity: false,
 };
+
+// Parse JSON, but degrade gracefully when a function returns a non-JSON error
+// page (e.g. a 504 timeout "An error occurred…") instead of crashing on .json().
+async function readJson(r: Response) {
+  const text = await r.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      r.ok ? "Server returned a non-JSON response." : `${r.status} — ${text.slice(0, 160).trim()}`,
+    );
+  }
+}
 
 export default function Studio() {
   const [image, setImage] = useState<File | null>(null);
@@ -112,7 +126,7 @@ export default function Studio() {
         },
         body: fd,
       });
-      const j = await r.json();
+      const j = await readJson(r);
       if (j.label) setOptions((o) => ({ ...o, material: j.label }));
       else if (j.error) setError(j.error);
     } catch (e) {
@@ -139,7 +153,7 @@ export default function Studio() {
       fd.append("image", image);
       fd.append("options", JSON.stringify(options));
       const sub = await fetch("/api/generate", { method: "POST", headers: falHeaders(), body: fd });
-      const subj = await sub.json();
+      const subj = await readJson(sub);
       if (!sub.ok || !subj.requestId) throw new Error(subj.error || "submit failed");
 
       setStage("running");
@@ -157,7 +171,7 @@ export default function Studio() {
       const r = await fetch(`/api/status?requestId=${encodeURIComponent(requestId)}`, {
         headers: falHeaders(),
       });
-      const s = await r.json();
+      const s = await readJson(r);
       if (s.error) throw new Error(s.error);
       if (typeof s.queuePosition === "number") setQueuePos(s.queuePosition);
       if (Array.isArray(s.logs) && s.logs.length) setLogs(s.logs);
@@ -177,7 +191,7 @@ export default function Studio() {
       },
       body: JSON.stringify({ requestId, options: { ...options, name: options.material } }),
     });
-    const j = await r.json();
+    const j = await readJson(r);
     if (!r.ok) throw new Error(j.error || "post-processing failed");
     setResult(j as ProcessedSet);
     setStage("done");

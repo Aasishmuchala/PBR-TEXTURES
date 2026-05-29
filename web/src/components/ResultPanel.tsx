@@ -7,6 +7,7 @@ const MAPS: { key: keyof ProcessedSet["urls"]; label: string; tag: string }[] = 
   { key: "normal", label: "Normal", tag: "DirectX" },
   { key: "orm", label: "ORM", tag: "R·G·B" },
   { key: "height", label: "Height", tag: "16-bit" },
+  { key: "opacity", label: "Opacity", tag: "alpha" },
 ];
 
 export function ResultPanel({ result }: { result: ProcessedSet }) {
@@ -33,7 +34,7 @@ export function ResultPanel({ result }: { result: ProcessedSet }) {
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {MAPS.map((m) => (
+        {MAPS.filter((m) => result.urls[m.key]).map((m) => (
           <a
             key={m.key}
             href={result.urls[m.key]}

@@ -192,6 +192,23 @@ export function OptionsPanel({
               </span>
             </span>
           </label>
+          <label className={`flex items-start gap-2 text-sm ${aiAvailable ? "" : "opacity-60"}`}>
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={options.opacity}
+              disabled={disabled || !aiAvailable}
+              onChange={(e) => set("opacity", e.target.checked)}
+            />
+            <span>
+              Opacity / alpha map
+              <span className="block text-[11px] text-forge-muted">
+                {aiAvailable
+                  ? "background removal → alpha (foliage, leaves, cutouts) · sets UE Masked · Replicate"
+                  : "add a Replicate token in Settings to enable"}
+              </span>
+            </span>
+          </label>
         </div>
       </div>
 

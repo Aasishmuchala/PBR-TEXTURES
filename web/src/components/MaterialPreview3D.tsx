@@ -20,12 +20,15 @@ class SafeBoundary extends Component<{ children: ReactNode }, { failed: boolean 
 }
 
 function PbrMesh({ urls, repeat, shape }: { urls: Urls; repeat: number; shape: "sphere" | "plane" }) {
-  const textures = useTexture([urls.baseColor, urls.normal, urls.orm, urls.height]) as THREE.Texture[];
-  const [map, normalMap, orm, height] = textures;
+  const sources = urls.opacity
+    ? [urls.baseColor, urls.normal, urls.orm, urls.height, urls.opacity]
+    : [urls.baseColor, urls.normal, urls.orm, urls.height];
+  const textures = useTexture(sources) as THREE.Texture[];
+  const [map, normalMap, orm, height, alpha] = textures;
 
   useLayoutEffect(() => {
     map.colorSpace = THREE.SRGBColorSpace;
-    for (const t of [normalMap, orm, height]) t.colorSpace = THREE.NoColorSpace;
+    for (const t of [normalMap, orm, height, alpha]) if (t) t.colorSpace = THREE.NoColorSpace;
     for (const t of textures) {
       t.wrapS = t.wrapT = THREE.RepeatWrapping;
       t.repeat.set(repeat, repeat);
@@ -57,6 +60,7 @@ function PbrMesh({ urls, repeat, shape }: { urls: Urls; repeat: number; shape: "
         aoMap={orm}
         roughnessMap={orm}
         metalnessMap={orm}
+        {...(alpha ? { alphaMap: alpha, alphaTest: 0.5 } : {})}
         displacementMap={height}
         displacementScale={0.12}
         displacementBias={-0.06}

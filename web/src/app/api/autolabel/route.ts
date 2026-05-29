@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { claudeOpusVision } from "@/lib/classify";
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
+export const maxDuration = 120; // opus-4-7 vision + fallback chain can be slow
 
 const PROMPT =
   "You are classifying a surface material for a PBR texture generator. " +

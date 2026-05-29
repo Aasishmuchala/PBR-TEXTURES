@@ -215,6 +215,17 @@ export async function seamlessResizePng(png: Buffer, target: number, pad = 64): 
   return sharp(out, { raw: { width: target, height: target, channels: ch } }).png().toBuffer();
 }
 
+// Extract the alpha channel from a background-removed RGBA image -> grayscale
+// opacity map at the target resolution (white = opaque, black = transparent).
+export async function extractOpacity(rgbaPng: Buffer, R: number): Promise<Buffer> {
+  return sharp(rgbaPng)
+    .ensureAlpha()
+    .resize(R, R, { fit: "fill" })
+    .extractChannel(3)
+    .png()
+    .toBuffer();
+}
+
 export async function buildUEMaps(maps: RawMaps, opts: BuildOptions): Promise<UEMaps> {
   const R = opts.resolution;
   if (!maps.basecolor) throw new Error("PATINA returned no base color map");

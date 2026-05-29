@@ -15,6 +15,7 @@ export interface GenerateOptions {
   aiUpscale: boolean; // AI super-res on base color via Replicate
   upscaler: "clarity" | "esrgan"; // clarity = detail synthesis (richer), esrgan = sharpen (safe/fast)
   compress: boolean; // smaller zip: base color -> JPG, data maps stay lossless
+  opacity: boolean; // derive an opacity/alpha map via background removal (foliage/cutouts)
 }
 
 export interface PatinaImage {
@@ -40,6 +41,7 @@ export interface ProcessedSet {
     orm: string;
     height: string;
     zip: string;
+    opacity?: string;
   };
   manifest: unknown;
 }

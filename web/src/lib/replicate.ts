@@ -107,3 +107,31 @@ export async function upscaleClarity(
   if (!img.ok) throw new Error(`download clarity image ${img.status}`);
   return Buffer.from(await img.arrayBuffer());
 }
+
+// Background removal -> RGBA PNG (transparent background). We extract the alpha
+// channel as the opacity/alpha map (great for foliage, leaves, fences, decals).
+export async function removeBackground(token: string, png: Buffer): Promise<Buffer> {
+  const model = await rjson(token, `/models/851-labs/background-remover`);
+  const version = model?.latest_version?.id;
+  if (!version) throw new Error("could not resolve background-remover version");
+
+  const imageUrl = await uploadFile(token, png);
+  let pred = await rjson(token, `/predictions`, {
+    method: "POST",
+    body: JSON.stringify({ version, input: { image: imageUrl, format: "png" } }),
+  });
+
+  const start = Date.now();
+  while (!["succeeded", "failed", "canceled"].includes(pred.status)) {
+    if (Date.now() - start > 120_000) throw new Error("background removal timed out");
+    await new Promise((r) => setTimeout(r, 2000));
+    pred = await rjson(token, `/predictions/${pred.id}`);
+  }
+  if (pred.status !== "succeeded") throw new Error(`background removal ${pred.status}`);
+
+  const out = Array.isArray(pred.output) ? pred.output[0] : pred.output;
+  if (typeof out !== "string") throw new Error("background removal returned no image");
+  const img = await fetch(out);
+  if (!img.ok) throw new Error(`download bg-removed image ${img.status}`);
+  return Buffer.from(await img.arrayBuffer());
+}
