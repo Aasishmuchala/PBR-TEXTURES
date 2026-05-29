@@ -1,0 +1,58 @@
+# Decisions & Open Questions (from research synthesis)
+
+## Executive summary
+
+Build the core of this product on fal.ai PATINA's Material Extraction endpoint (fal-ai/patina/material) — it is the single biggest leverage point in the entire pipeline, collapsing classify-ish delight, deshadow, seamless-tiling, upscale, and 5-map PBR generation into ONE API call for roughly $0.08-0.61. This directly contradicts one research agent's claim that "no turnkey single-image-to-PBR API exists in 2026"; that agent simply didn't have fal in scope. The catch you must act on immediately: PATINA is fal-exclusive (it's a FLUX.2-klein backbone) and NONE of your provisioned credentials reach it — you have Higgsfield, Replicate, OpenRouter and the Pixa/HF/Supabase/Vercel MCPs, but not fal. Get a fal.ai key before anything else; it is the keystone. Everything PATINA does NOT give you, you build yourself in cheap deterministic code: ambient occlusion (derive from the height map), the UE5 ORM channel-pack (R=AO, G=Roughness, B=Metallic, sRGB OFF), DirectX-convention normals, and 16-bit height — these four disciplines are exactly the "UE-native" moat the competitive research identified, since every rival (WithPoly, Scenario, Substance) stops at loose PNGs. Use OpenRouter (gemini-2.5-flash-lite) plus a tiny self-hosted SigLIP2 classifier only for a quality GATE and material confirmation, not for the maps. The web architecture is the genuinely hard part: a 30s-to-several-minute multi-step GPU pipeline cannot run inside any serverless request, so you need a durable orchestrator (Trigger.dev) firing async jobs, with Supabase as the state machine/auth/storage and Vercel as the thin frontend. Drop Higgsfield from the core path (zero PBR capability) and treat Pixa as a fallback upscaler only. Realistic all-in variable cost is ~$0.20-0.45 per native-4K set with retries; fixed infra floor ~$55/mo. Ship an MVP that is PATINA + your ORM packer + a UE-ready zip first; defer self-hosting open models until you have paying users.
+
+## Recommended stack
+
+| Layer | Choice | Why |
+|---|---|---|
+| Frontend | Next.js 15 App Router on Vercel (deploy via Vercel MCP) | Thin BFF that validates upload, mints signed URL, creates job row, enqueues, and returns fast — never runs the pipeline. RSC for marketing/dashboard; client components only for preview + progress. Pro plan needed for commercial use. |
+| 3D preview | react-three-fiber + drei + three.js (meshStandardMaterial) | In-browser PBR preview on a sphere/plane with HDRI Environment, OrbitControls, and repeat/RepeatWrapping to prove seamlessness BEFORE the user pays. Preview from the UE5 ORM-packed channels at downscaled 1K-2K so it validates the actual export, not just pretty maps. |
+| Core PBR (delight+seamless+maps+upscale) | fal.ai PATINA Material Extraction — fal-ai/patina/material (fallback: self-hosted gvecchio/StableMaterials on Replicate) | One call does the five hardest stages. REQUIRES a new fal.ai key — not reachable via any provisioned credential or MCP. The StableMaterials fallback is the commercial-OK escape hatch from fal dependency. |
+| Classification / quality gate | prithivMLmods/Minc-Materials-23 (SigLIP2) on HF Inference Endpoint + OpenRouter google/gemini-2.5-flash-lite (fallback: gemini-3.1-flash-lite) | Fine-tuned classifier names the material (~90% vs ~40% zero-shot LLM); the cheap VLM handles perspective/gloss/watermark judgment and emits strict JSON. Both run on every upload for well under $0.001. |
+| AO + ORM pack + convention fix | Your own code (Sharp/OpenCV) in a Supabase Edge Function | PATINA emits no AO — derive it from Height, then pack R=AO/G=Rough/B=Metal sRGB-OFF, ensure DirectX normals, write 16-bit Height. THIS is the UE-native moat rivals skip. |
+| Data-map / premium upscale | PATINA upscale_factor for albedo; Replicate nightmareai/real-esrgan + Lanczos for data maps; philz1337x/clarity-upscaler or cjwbw/supir for premium albedo | Never AI-upscale normal/roughness/metallic per-map (breaks cross-map consistency). Creative diffusion on albedo only; deterministic for data maps; re-tile after any non-PATINA upscaler. |
+| Jobs / queue / orchestration | Trigger.dev (fallback: Supabase Queues pgmq + pg_cron + edge worker) | A multi-minute multi-GPU pipeline cannot live in a serverless request. Trigger.dev has no task timeout, checkpoints on waits (no paying for GPU idle), and gives retries/idempotency/concurrency caps free. Apache-2.0 self-host escape. pgmq is the zero-extra-vendor fallback. |
+| GPU execution | Replicate (async predictions + signed webhooks) — user already has the key | Keeps workers thin. Async POST returns instantly; completion via webhook. CRITICAL: outputs delete ~1h after completion — webhook must copy to R2 immediately. Use public/keep-warm models to avoid ~10x cold-start billing. |
+| Storage | Cloudflare R2 for outputs/zip; Supabase Storage for user inputs | R2 zero egress is decisive for a download-heavy product (vs Supabase $0.09/GB) and aligns now that Cloudflare owns Replicate. Keep RLS-gated user inputs in Supabase for auth simplicity. Serve downloads via short-lived presigned R2 URLs behind the CDN. |
+| DB / Auth / Realtime | Supabase Postgres + Auth + Realtime (MCP connected) | The jobs table IS the pipeline state machine (status, current_step, progress%, per-step prediction ids, storage keys, idempotency_key). RLS scopes rows to owners. Push live progress over Realtime Broadcast (not Postgres-Changes) — no SSE/polling server. |
+| Billing | Stripe credits/subscription with pre-authorize-then-settle metering | Reserve estimated credits before a job (reject if insufficient), settle against real Replicate/fal cost after; pad for cold starts; flush one aggregated meter event per job. Prevents losing money on expensive 4K/8K runs. |
+| Deploy | Vercel (frontend) + the managed services above | Total ops surface is five managed accounts (Vercel + Supabase + Trigger.dev + Stripe + Replicate/fal), near-zero servers — right for a solo founder. Fixed floor ~$55/mo before variable GPU. |
+
+## Pipeline steps
+
+1. 1. Upload: Vercel Route Handler validates file, mints a Supabase signed URL, creates the jobs row, enqueues to Trigger.dev, returns a job id immediately (well under timeout).
+2. 2. Gate (deterministic, free): Supabase edge fn reads pixels/EXIF via Sharp — width/height/MP, square-ness, FFT edge-wrap tileability bool; hard-reject <512px or strong-perspective later.
+3. 3. Classify/confirm: self-hosted SigLIP2 (Minc-Materials-23) returns material label + confidence; OpenRouter gemini-2.5-flash-lite on a 768px thumb returns capture-type/gloss/metalness/watermark as strict JSON; reconcile into one contract row.
+4. 4. Core generation: fire fal-ai/patina/material async with the image (+ material label) and tiling_mode=both — returns Base Color, Normal, Roughness, Metalness, Height, seamless, upscaled.
+5. 5. Delight insurance (conditional): if classifier+LLM flag baked lighting on a hard input, prepend ccareaga/Intrinsic or RGB-to-X to strip illumination, then re-run step 4 on the cleaned swatch.
+6. 6. AO derivation (your code): compute an AO/cavity pass from PATINA's Height map in a Supabase edge fn.
+7. 7. ORM pack + convention fix (your code): pack R=AO/G=Roughness/B=Metallic with sRGB OFF, ensure DirectX-convention normal (flip green if needed), write Height as 16-bit PNG/EXR; clamp metallic by material class.
+8. 8. Optional upscale (paid tier): PATINA 4x for albedo, or for the self-hosted tier Clarity on albedo + Lanczos/Real-ESRGAN on data maps, then a geometric re-tile pass applied identically to every map.
+9. 9. UE5 export: name with T_/_BC/_N/_ORM/_H suffixes, generate M_PBR_Master + MI_ for the user's UE version, zip with raw maps + a one-page import recipe, store in R2.
+10. 10. Deliver: webhook copies all outputs to R2 (before Replicate's ~1h deletion), updates the job row, Supabase Realtime pushes done to the browser, user downloads via a short-lived presigned R2 URL.
+
+## Estimated unit cost
+
+~$0.20-0.45 per native-4K (2048px) PBR set all-in with retry padding — dominated by fal PATINA (~$0.16-0.30 at native 2K with 5 maps; classify is sub-cent; your AO/ORM packing is ~free compute). An 8K premium set via PATINA 4x is ~$0.61. Baseline fixed infra ~$55/mo (Vercel Pro $20 + Supabase Pro $25 + Trigger.dev Hobby $10) before variable GPU/API and R2 storage (~$0.015/GB-mo, $0 egress); a free-tier path exists on every service to validate first. NOTE: requires provisioning a fal.ai key, which you do not currently have.
+
+## Build roadmap
+
+1. MVP Slice 0 — Provision the keystone: get a fal.ai API key (you don't have one; PATINA is fal-exclusive and the whole MVP depends on it). Confirm fal's commercial output-license terms before building further.
+2. MVP Slice 1 — Prove the core OFFLINE (a script, not a web app): pipe one local photo through fal-ai/patina/material, then your own AO-from-height + ORM-pack (R=AO/G=Rough/B=Metal, sRGB OFF) + DirectX-normal + 16-bit-height + zip. Import the result into YOUR UE5 project and confirm it looks correct. This single slice de-risks 80% of the product.
+3. MVP Slice 2 — Thin web flow: Next.js upload page on Vercel + Supabase Auth/Storage/jobs-table + Trigger.dev orchestrating the Slice-1 pipeline as async steps with a Replicate/fal webhook that copies outputs to R2. Supabase Realtime drives a progress bar. Output = downloadable UE-ready zip.
+4. MVP Slice 3 — Trust + gate: add the deterministic gate (resolution/perspective/watermark via Sharp + SigLIP2 + gemini-2.5-flash-lite) so you reject bad inputs before spending on PATINA, and add the react-three-fiber tiled 3D preview so users verify tiling before download.
+5. Slice 4 — Monetize: Stripe credits with pre-authorize-then-settle; free low-res/watermarked tier; paid native-4K; premium 8K via PATINA 4x. Wire one aggregated meter event per job.
+6. Slice 5 — NYRA integration: expose the pipeline as a single image-in / UE-ORM-set-out REST endpoint and call it from the NYRA UE5 plugin (in-editor generate-from-photo). This is the distribution wedge.
+7. Slice 6 — Moat / de-risk vendor lock: add the seamless geometric re-tile pass for non-PATINA upscalers, then stand up a self-hosted gvecchio/StableMaterials (OpenRAIL) path on Replicate behind the same map-generation interface as a fal escape hatch. Track MatE weights for a future quality upgrade. Keep Ubisoft CHORD as an internal benchmark only (research-only license).
+
+## Open questions
+
+1. fal.ai provisioning + license: Are you willing to add a fal.ai account/key (the MVP cannot ship without it), and have you confirmed fal permits commercial resale of PATINA-generated textures? This is the one unverified license in the research.
+2. Resolution honesty: Is PATINA's native 2048px acceptable as your '4K' (upscaled), or do you require true 4096px-native output — which means a 2x/4x upscale step and a higher unit cost? This changes both cost and marketing claims.
+3. Pricing model: pay-per-texture credits (best fit for ~$0.30 unit cost and to undercut WithPoly/Scenario subscriptions) vs a flat monthly subscription — which do you want to launch with?
+4. Orchestrator vendor tolerance: add Trigger.dev ($10/mo, fastest path) or stay 100% inside Supabase with pgmq + pg_cron (zero extra vendor, but you hand-roll retries/observability)?
+5. UE version targets: which UE versions must the shipped Material/MI .uasset support (5.4? 5.5? both)? Each needs its own build; the raw-maps + recipe fallback covers the rest.
+6. Self-hosting appetite: do you want the StableMaterials fallback/moat in the first 8 weeks (insurance against fal dependency, more ops), or deferred until after paying users validate the PATINA-only MVP?

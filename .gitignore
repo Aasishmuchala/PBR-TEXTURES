@@ -1,0 +1,38 @@
+# dependencies / build
+node_modules/
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+.tmp/
+
+# secrets / env (keep .env.example)
+.env
+.env.local
+.env.*.local
+*.key
+
+# python (core-proof)
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# generated texture outputs
+output/
+core-proof/output/
+data/
+*.zip
+
+# logs
+*.log
+dev_smoke.*
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

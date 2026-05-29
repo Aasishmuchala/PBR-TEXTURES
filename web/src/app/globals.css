@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: #fbfaf7;
+  color: #1a1917;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+@layer components {
+  /* refined single surface */
+  .card {
+    @apply rounded-[1.5rem] bg-forge-panel shadow-softer ring-1 ring-black/[0.06];
+  }
+
+  /* pills, button-in-button friendly */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-5 py-2.5 text-sm font-medium transition-transform duration-500 ease-spring disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-primary {
+    @apply btn bg-forge-text text-forge-bg hover:shadow-lift active:scale-[0.98];
+  }
+  .btn-ghost {
+    @apply btn bg-transparent text-forge-text ring-1 ring-black/10 hover:bg-black/[0.03] active:scale-[0.98];
+  }
+
+  .input {
+    @apply w-full rounded-2xl border-0 bg-black/[0.03] px-4 py-2.5 text-sm text-forge-text outline-none ring-1 ring-black/[0.06] transition placeholder:text-forge-muted/70 focus:ring-2 focus:ring-forge-accent/40;
+  }
+  .label {
+    @apply mb-2 block text-[11px] font-medium uppercase tracking-[0.16em] text-forge-muted;
+  }
+  .eyebrow {
+    @apply inline-flex items-center gap-1.5 rounded-full bg-black/[0.04] px-3 py-1 text-[10px] font-medium uppercase tracking-[0.2em] text-forge-muted ring-1 ring-black/[0.05];
+  }
+  .chip {
+    @apply rounded-full bg-black/[0.04] px-2.5 py-1 text-[11px] text-forge-muted ring-1 ring-black/[0.05];
+  }
+  /* soft inset well for media/thumbnails on the light UI */
+  .well {
+    @apply rounded-2xl bg-[#17161a] ring-1 ring-black/10;
+  }
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #ddd8cd transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #e6e1d6;
+  border-radius: 8px;
+}
+
+/* range sliders -> warm accent */
+input[type="range"] {
+  accent-color: #c75b39;
+}

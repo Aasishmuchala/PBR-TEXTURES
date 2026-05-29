@@ -1,0 +1,1158 @@
+[
+  {
+    "key": "pbr-extraction",
+    "label": "PBR map generation",
+    "summary": "For turning ONE photo into a full UE5 PBR set (Albedo/Normal/Roughness/Metallic/Height/AO + packed ORM), the 2025-26 market splits into four tiers. (1) HOSTED APIs are the right backbone for a solo founder: fal.ai PATINA is the clear leader — its \"Material Extraction\" endpoint (fal-ai/patina/material) does almost the entire pipeline (delight-by-flat-render, remove occluders/shadows, make seamless/tileable, upscale to 8K, emit 5 maps) in ONE call for ~$0.08-$0.61. Replicate has only weak/old options (tommoore515/pix2pix_tf_albedo2pbrmaps, midllle/material-maker) and is better used for the UPSCALE and TEXT-FALLBACK stages than for the core estimation. (2) OPEN/SELF-HOST: Ubisoft CHORD is SOTA quality (open weights, ComfyUI + headless test.py) but RESEARCH-ONLY license = commercial blocker; gvecchio/StableMaterials is the best commercially-usable open model (OpenRAIL, tileable, text+image, LCM fast path) but only 512px native. (3) DEDICATED TOOLS: Adobe Substance has the best image-to-material (\"Delight\" via Adobe Sensei) but it is GUI-only — the Automation Toolkit is Enterprise/Team-only and does NOT expose image-to-material, so it is effectively non-automatable for this app. Poly/Polycam/3D-AI-Studio are browser tools (Poly/Polycam JPEG-only, no documented API; 3D AI Studio has a REST API). Materialize/DeepBump are free/local but pure image-heuristics (no delighting). (4) ACADEMIC SOTA worth tracking/self-hosting: MatE (Dec 2025, best single-photo tileable + geometric rectification), DualMat & SuperMat (best delighting, but object-oriented; SuperMat runs in milliseconds — great for a cheap tier), ControlMat/MatFusion/StableMaterials lineage (Vecchio/Deschaintre). CRITICAL caveats for the build: every AI material model here OMITS ambient occlusion and most omit a true delit albedo — you must (a) prefer the PATINA *material-extraction* endpoint (not the plain image2image, which just copies the photo into albedo) or bolt on a dedicated delighter (RGB↔X, ccareaga/Intrinsic, or Substance Sampler Delight), and (b) derive AO from the height map and channel-pack ORM (R=AO, G=Rough, B=Metal, sRGB OFF) yourself in a Supabase edge function / sharp step. Height/displacement also needs 16-bit output — Poly/Polycam JPEG paths fail this.",
+    "options": [
+      {
+        "name": "fal.ai PATINA — Material Extraction endpoint",
+        "url": "https://fal.ai/models/fal-ai/patina/material",
+        "what": "THE best-fit hosted option. Takes a single image (+ optional text label), identifies the material, renders it FLAT, removes occluding elements/shadows, makes it seamlessly tileable, upscales to 8K, and returns a full PBR set (basecolor, normal, roughness, metalness, height). This collapses classify→delight→seamless→upscale into one API call — almost the whole app pipeline. Trained on CC0 libraries re-rendered under dozens of lighting setups, so it separates material from lighting by design (the closest thing to true delit albedo available as an API).",
+        "maturity": "production-ready (launched 2025, actively used; pbr.directory hosts 731 sample 4K sets)",
+        "pricing": "Image→PBR: $0.01 base + $0.01/megapixel/output-map. ~$0.08 for a 1K 5-map set; a 2K→8K (4x) full set ≈ $0.61. Upscale add-on $0.004/MP (2x) or $0.016/MP (4x) per map.",
+        "pros": [
+          "One call does delight + deshadow + seamless tiling + 8K upscale + 5 maps",
+          "Output explicitly seamless/tileable and up to 8K — matches the 4K target with headroom",
+          "Trained to disentangle lighting → albedo is far closer to delit than photo-copy tools",
+          "Simple REST/queue API, fits Supabase edge function or Vercel serverless",
+          "Cheap per asset; pay-per-use suits a solo founder"
+        ],
+        "cons": [
+          "Does NOT output AO — you must derive AO from height and pack ORM yourself",
+          "Closed model; you're dependent on fal uptime/pricing",
+          "'Material extraction' is a generative reconstruction, so it can hallucinate detail vs. a strict photometric capture",
+          "Metalness on non-metal photos can misfire — validate/clamp"
+        ]
+      },
+      {
+        "name": "fal.ai PATINA — Image-to-Image (plain)",
+        "url": "https://fal.ai/models/fal-ai/patina",
+        "what": "Slug fal-ai/patina. Predicts the 5 PBR maps from an image but, per fal's docs, 'the image itself is not modified — it is analyzed.' Means the base color stays essentially the input photo (lighting/shadows retained). Use only if the input is ALREADY a clean flat delit swatch; otherwise prefer the /material endpoint.",
+        "maturity": "production-ready",
+        "pricing": "$0.01 base + $0.01/MP/map (≈$0.06-$0.08 for 1K, 5 maps)",
+        "pros": [
+          "Cheapest PATINA mode",
+          "Good when input is already a flat, evenly-lit tile"
+        ],
+        "cons": [
+          "No delighting — albedo = the photo (bakes in shadows) ⇒ wrong for UE5 PBR from casual photos",
+          "No AO",
+          "Not the seamless/flatten path"
+        ]
+      },
+      {
+        "name": "Ubisoft CHORD (Generative Base Material)",
+        "url": "https://github.com/ubisoft/ubisoft-laforge-chord",
+        "what": "SIGGRAPH Asia 2025 open-weights SVBRDF estimator. Outputs basecolor, normal, height, roughness, metalness from a texture image. Headless test.py + Gradio + ComfyUI nodes (ubisoft/ComfyUI-Chord). Weights gated on HF at Ubisoft/ubisoft-laforge-chord. Optimized for 1024px with a 2x/4x upscaler for 2K/4K.",
+        "maturity": "mature research release (Sept 2025, paper arXiv:2509.09952), self-host",
+        "pricing": "Free weights; you pay GPU (HF Space / Replicate custom / own server)",
+        "pros": [
+          "SOTA visual quality among open models",
+          "Headless inference available (not ComfyUI-locked)",
+          "Full 5-map set incl. height + metalness",
+          "Backed by Ubisoft, well documented"
+        ],
+        "cons": [
+          "LICENSE: 'Ubisoft Machine Learning License — Research-Only, Copyleft' → NOT usable in a commercial product. This is a hard blocker unless you license separately",
+          "Does NOT do true delighting (uses an approximated irradiance map; not photometric albedo recovery)",
+          "1024 native; upscaling accumulates error",
+          "No AO output",
+          "Needs your own GPU hosting"
+        ]
+      },
+      {
+        "name": "gvecchio/StableMaterials",
+        "url": "https://huggingface.co/gvecchio/StableMaterials",
+        "what": "Open LDM (MatFuse/ControlMat lineage, author Giuseppe Vecchio) generating basecolor/normal/height/roughness/metallic from TEXT or IMAGE prompt. Tileable via a 'Feature Rolling' trick. Ships an LCM variant (4 steps vs 50) for fast/cheap inference. HF Space (gvecchio/StableMaterials) runs on free ZeroGPU.",
+        "maturity": "mature open model (HF Space live, diffusers pipeline)",
+        "pricing": "Free weights (OpenRAIL); GPU cost only",
+        "pros": [
+          "OpenRAIL license — commercial use allowed (unlike CHORD)",
+          "Native tileable output",
+          "Text AND image conditioning (good for the text-fallback tier)",
+          "LCM fast path = cheap real-time tier",
+          "diffusers-native → easy to wrap in a Replicate/HF endpoint"
+        ],
+        "cons": [
+          "512x512 native — must upscale aggressively to reach 4K",
+          "It's a GENERATIVE model: image prompt yields a plausible material in that style, not a faithful delit reconstruction of YOUR photo",
+          "No AO",
+          "Quality below CHORD/PATINA on fine detail"
+        ]
+      },
+      {
+        "name": "MatE — Material Extraction from Single-Image via Geometric Prior",
+        "url": "https://arxiv.org/abs/2512.18312",
+        "what": "Dec 2025 SOTA for the EXACT app use-case: tileable PBR (albedo, normal, roughness, height) from ONE in-the-wild photo. Uses estimated depth as a geometric prior to rectify perspective, then a dual-branch diffusion model removes residual distortion + unknown illumination → illumination- and perspective-invariant material. Explicitly targets casual captures.",
+        "maturity": "experimental / cutting-edge (paper Dec 2025; check for code release)",
+        "pricing": "unknown (research; no hosted API yet)",
+        "pros": [
+          "Designed precisely for 'one casual photo → tileable PBR'",
+          "Explicit delighting (illumination invariance) + perspective rectification — solves the two hardest problems",
+          "Handles real-world, non-flat captures better than flat-swatch models"
+        ],
+        "cons": [
+          "No confirmed public weights/API as of now — track the repo",
+          "Diffusion = slower/heavier to self-host",
+          "No metalness/AO in the listed map set (albedo/normal/rough/height)"
+        ]
+      },
+      {
+        "name": "SuperMat",
+        "url": "https://hyj542682306.github.io/SuperMat/",
+        "what": "ICCV 2025 single-STEP PBR decomposition: albedo, metallic, roughness at millisecond speed with physically-consistent re-render loss; UV-refinement extends to 3D objects (~3s). Best candidate for a fast/cheap delighting tier.",
+        "maturity": "experimental (ICCV 2025; arXiv:2411.17515)",
+        "pricing": "unknown (research code)",
+        "pros": [
+          "Millisecond inference → ideal for a free/instant tier or live preview",
+          "Strong, physically-consistent delighting of albedo",
+          "One-step (no diffusion sampling cost)"
+        ],
+        "cons": [
+          "Object/scene-oriented, not flat tileable swatches — needs adaptation",
+          "No normal/height in core output",
+          "Self-host; tiling not built in"
+        ]
+      },
+      {
+        "name": "DualMat",
+        "url": "https://arxiv.org/html/2508.05060v1",
+        "what": "ACM MM 2025 dual-path diffusion estimating albedo/metallic/roughness under complex lighting; +28% albedo, -39% metallic-roughness error vs SurfaceNet/IntrinsicAnything. Object-material focused (image-to-3D pipelines).",
+        "maturity": "experimental (2025 paper; project page yifehuang97.github.io/DualMatProjPage)",
+        "pricing": "unknown",
+        "pros": [
+          "Best-in-class albedo/metalness/roughness accuracy under hard lighting",
+          "Good delighting"
+        ],
+        "cons": [
+          "No normal/height; not tileable; object-centric",
+          "No confirmed weights/API"
+        ]
+      },
+      {
+        "name": "RGB↔X (Adobe, SIGGRAPH 2024)",
+        "url": "https://github.com/zheng95z/rgbx",
+        "what": "Material- and lighting-aware diffusion that decomposes an image into albedo/roughness/metallic (RGB→X) and re-synthesizes (X→RGB). Best open option to use purely as a DELIGHTER/intrinsic stage in front of a flat-swatch model.",
+        "maturity": "mature research code (public GitHub)",
+        "pricing": "Free code; GPU cost",
+        "pros": [
+          "Strong, lighting-aware albedo/roughness/metallic decomposition",
+          "Public code",
+          "Good as a pre-delight stage to feed PATINA-image2image or StableMaterials"
+        ],
+        "cons": [
+          "Indoor-scene oriented; not tileable",
+          "No normal/height/AO",
+          "Self-host diffusion"
+        ]
+      },
+      {
+        "name": "ccareaga/Intrinsic (HF Space)",
+        "url": "https://huggingface.co/spaces/ccareaga/Intrinsic",
+        "what": "Live HF Space for intrinsic decomposition → albedo + diffuse shading. Cheapest drop-in DELIGHTER to strip lighting from the photo before deriving the rest of the maps.",
+        "maturity": "production-usable demo (live Space)",
+        "pricing": "Free Space (ZeroGPU)",
+        "pros": [
+          "Instant, free albedo/delight via API-able Space",
+          "Easy to chain before a map-deriver"
+        ],
+        "cons": [
+          "Only albedo+shading (no full PBR set)",
+          "Not tileable; quality below dedicated material models"
+        ]
+      },
+      {
+        "name": "Adobe Substance 3D Sampler (Image-to-Material + AI Delight)",
+        "url": "https://helpx.adobe.com/substance-3d-sampler/filters/tools/delight-ai-powered.html",
+        "what": "Industry benchmark for photo→material: Adobe Sensei Image-to-Material outputs color/height/roughness/normal/AO, plus a dedicated AI 'Delight' filter that removes baked lighting → true albedo. The gold standard for OUTPUT quality and the one tool that natively gives AO + delight.",
+        "maturity": "mature/production (Sampler 5.1, 2025)",
+        "pricing": "Substance 3D subscription (~$20-50/mo individual). Automation Toolkit (sbsrender/sbscooker/pysbs) is ENTERPRISE/TEAM-ONLY.",
+        "pros": [
+          "Best-quality delit albedo + native AO",
+          "Single-app full UE5 map set",
+          "Has the 'Delight' filter no AI model here matches"
+        ],
+        "cons": [
+          "NOT automatable for a web app: image-to-material + Delight are GUI/Sensei features; the headless Automation Toolkit does NOT expose them and is enterprise-only",
+          "No public hosted REST API (s3d.adobe.io is not a public image-to-material endpoint)",
+          "Licensing/cost wrong for a per-upload SaaS backend"
+        ]
+      },
+      {
+        "name": "Poly (withpoly.com)",
+        "url": "https://withpoly.com/",
+        "what": "Browser generative PBR: text/image prompt → seamless up to 8K with Color/Normal/Height/AO/Roughness/Metalness, 32-bit, royalty-free on Pro. Notably the rare tool that DOES output AO.",
+        "maturity": "mature product",
+        "pricing": "Free tier; Poly Infinity $20/mo for 8K/32-bit + commercial license",
+        "pros": [
+          "Full 6-map set INCLUDING AO + metalness",
+          "Seamless, up to 8K, 32-bit (good for height)",
+          "Commercial license on Pro"
+        ],
+        "cons": [
+          "No documented public API → not cleanly programmable for an automated backend",
+          "Generative/prompt-driven: image input is a style reference, not a faithful delit capture",
+          "Acquired/uncertain roadmap — verify current availability"
+        ]
+      },
+      {
+        "name": "Polycam Textures (Material Generator)",
+        "url": "https://poly.cam/tools/material-generator",
+        "what": "Text-to-seamless-PBR (albedo, normal, displacement, roughness), tileable, royalty-free, works with UE5.",
+        "maturity": "mature product",
+        "pricing": "Free online; full features need Polycam Pro",
+        "pros": [
+          "Seamless out of the box, UE-ready, royalty-free",
+          "Simple"
+        ],
+        "cons": [
+          "JPEG-only, no EXR/16-bit → height/displacement banding (bad for UE5 displacement)",
+          "No metalness/AO in the set; text-driven",
+          "No documented API"
+        ]
+      },
+      {
+        "name": "3D AI Studio — PBR Map Generator + REST API",
+        "url": "https://www.3daistudio.com/Tools/PBRMapGenerator",
+        "what": "Upload image → normal, roughness, height, depth, metallic. Has a documented production REST API (Bearer token) for its 3D/PBR features.",
+        "maturity": "production product",
+        "pricing": "From $19/mo; PBR maps 4 credits/gen; volume API on request",
+        "pros": [
+          "Image-to-maps with an actual REST API (rare in this tier)",
+          "Affordable subscription"
+        ],
+        "cons": [
+          "No AO; delighting quality unverified (likely heuristic, albedo≈photo)",
+          "Quality not benchmarked vs PATINA/CHORD",
+          "API primarily oriented to 3D model gen"
+        ]
+      },
+      {
+        "name": "Replicate: tommoore515/pix2pix_tf_albedo2pbrmaps",
+        "url": "https://replicate.com/tommoore515/pix2pix_tf_albedo2pbrmaps",
+        "what": "Old pix2pix GAN: albedo → 4 maps for Unity Standard shader. ~$0.001/run, ~1s.",
+        "maturity": "deprecated-ish (>1yr old, unmaintained)",
+        "pricing": "~$0.00098/run (L40S)",
+        "pros": [
+          "Dirt cheap and fast on the user's existing Replicate account",
+          "Trivial to call"
+        ],
+        "cons": [
+          "Low quality, 2018-era GAN; Unity-oriented map conventions",
+          "No delighting (assumes you already have albedo)",
+          "Not seamless; resolution-limited"
+        ]
+      },
+      {
+        "name": "Replicate: midllle/material-maker",
+        "url": "https://replicate.com/midllle/material-maker/api/schema",
+        "what": "Replicate model generating AI normal/displacement/roughness maps from an image.",
+        "maturity": "experimental/low-traffic",
+        "pricing": "per-run on Replicate (varies)",
+        "pros": [
+          "On the user's existing Replicate account",
+          "Quick normal/height/rough"
+        ],
+        "cons": [
+          "No albedo delight, no metalness/AO",
+          "Unverified quality; not seamless"
+        ]
+      },
+      {
+        "name": "DeepBump (HugoTini)",
+        "url": "https://github.com/HugoTini/DeepBump",
+        "what": "ML tool: normal + height from a single picture. Available as Blender add-on and ComfyUI 'Deep Bump (mtb)' node — easy to self-host as a normal/height stage.",
+        "maturity": "mature OSS",
+        "pricing": "Free (self-host)",
+        "pros": [
+          "Solid, fast normal/height generation",
+          "Easy to wrap (ComfyUI node) into a pipeline",
+          "Free"
+        ],
+        "cons": [
+          "ONLY normal/height — no albedo/rough/metal/AO",
+          "No delighting",
+          "Quality below diffusion SVBRDF models"
+        ]
+      },
+      {
+        "name": "Materialize (Bounding Box Software)",
+        "url": "https://www.boundingboxsoftware.com/materialize/",
+        "what": "Free standalone: derives Height, Normal, Metallic, Smoothness, AO from a diffuse via image-processing chains (Diffuse→Height→Normal→Occlusion).",
+        "maturity": "mature OSS-ish (free)",
+        "pricing": "Free",
+        "pros": [
+          "Free, produces a full map set incl. AO",
+          "Deterministic/controllable"
+        ],
+        "cons": [
+          "Pure heuristics — albedo = the input photo (NO delighting)",
+          "GUI tool (Windows); not a clean headless API",
+          "Lowest fidelity tier; manual tuning"
+        ]
+      },
+      {
+        "name": "GenPBR / normalmap.ai (client-side)",
+        "url": "https://genpbr.com/",
+        "what": "Browser, 100% client-side algorithmic PBR (normal/metallic/roughness/AO/height). Zero server cost, privacy-preserving.",
+        "maturity": "mature product",
+        "pricing": "Free / freemium",
+        "pros": [
+          "Zero backend cost (runs in user's browser)",
+          "Instant, private",
+          "Good as a free/offline fallback tier"
+        ],
+        "cons": [
+          "Algorithmic, not AI — albedo≈photo (no delight)",
+          "Quality clearly below AI SVBRDF models",
+          "Not a server API (runs client-side)"
+        ]
+      }
+    ],
+    "recommendation": "PRIMARY (ship this): Build the core map-generation stage on **fal.ai PATINA's Material Extraction endpoint (fal-ai/patina/material)**. It is the only hosted API that performs the app's hardest steps in one call — flatten/delight, remove shadows/occluders, make seamless/tileable, upscale to 8K, and emit basecolor+normal+roughness+metalness+height — at ~$0.08-$0.61 per asset. Wire it from a Supabase edge function (the user already has Supabase + a fal/Higgsfield-class MCP and Replicate/OpenRouter). Use the plain fal-ai/patina image2image ONLY when the input is already a clean flat swatch.\n\nFILL THE TWO GAPS PATINA LEAVES (do this in your own code, not another model): (1) AO is not produced by PATINA (or CHORD/StableMaterials) — derive AO from the returned HEIGHT map (e.g., a cavity/AO pass via sharp/OpenCV or a quick bake) and then channel-pack ORM with R=AO, G=Roughness, B=Metallic, sRGB OFF, per UE5 convention (see rapidpipeline.com/orm). (2) Ensure HEIGHT is exported 16-bit (PNG16/EXR) so UE5 displacement/tessellation doesn't band — this is also why you must avoid the JPEG-only tools (Poly/Polycam) for the height path.\n\nTIERING / FALLBACKS: \n- Cheap/instant tier or live preview → self-host **SuperMat** (millisecond, strong delight) or **gvecchio/StableMaterials LCM** (OpenRAIL, tileable, 4-step). \n- Text-fallback (user has no usable photo) → StableMaterials text mode, or Poly/Polycam for quick seamless sets. \n- Quality ceiling / future upgrade → self-host **CHORD** for internal/comparison use ONLY (its research-only license blocks commercial shipping — do not put it in the paid product without a separate Ubisoft license) and TRACK **MatE** (Dec 2025), which is purpose-built for 'one casual photo → tileable PBR' and will likely beat PATINA on real-world non-flat captures once code/weights drop.\n\nDELIGHTING INSURANCE: If PATINA's albedo still carries lighting on tricky inputs, prepend a dedicated delighter — **RGB↔X** (github.com/zheng95z/rgbx) or the free **ccareaga/Intrinsic** HF Space — to strip illumination BEFORE map derivation. Avoid Materialize/DeepBump/GenPBR for albedo: they copy the photo (no delighting) and are only acceptable as a free offline normal/height fallback. Adobe Substance Sampler has the best delight+AO quality of anything here, but it is GUI/enterprise-only and cannot be automated as a SaaS backend — treat it as a manual QA reference, not a pipeline component.\n\nUPSCALE NOTE: PATINA already upscales to 8K, but if you self-host the open models (512-1024 native), run a per-map upscale on Replicate (or fal seedvr) — upscale Normal/Height/ORM WITHOUT sRGB and avoid 'creative' upscalers that hallucinate albedo detail into the data maps.",
+    "keyTakeaways": [
+      "fal.ai PATINA Material Extraction (slug: fal-ai/patina/material) is the best production backbone — it delights/flattens, deshadows, tiles seamlessly, upscales to 8K, and emits 5 PBR maps in ONE API call for ~$0.08-$0.61. The plain fal-ai/patina image2image does NOT delight (albedo = the photo).",
+      "Almost NO AI material model outputs Ambient Occlusion — PATINA, CHORD, StableMaterials, DualMat all omit it. You must derive AO from the height map and channel-pack ORM yourself (R=AO, G=Rough, B=Metal, sRGB OFF) in a Supabase edge function / sharp step.",
+      "True delit albedo is the real differentiator: PATINA's material-extraction and the intrinsic models (RGB↔X, SuperMat, DualMat, ccareaga/Intrinsic, Substance 'Delight') remove lighting; the cheap/classical tools (Materialize, DeepBump, GenPBR, Polycam, plain image2image) just copy the photo into albedo and bake in shadows.",
+      "Ubisoft CHORD is the highest-quality open SVBRDF model but its license is RESEARCH-ONLY/copyleft — a hard commercial blocker. gvecchio/StableMaterials (OpenRAIL, tileable, text+image, LCM fast path) is the best commercially-licensable open model, though 512px native and generative rather than a faithful capture.",
+      "Adobe Substance 3D Sampler has the best image-to-material + AI Delight + native AO, but it is GUI-only: the headless Automation Toolkit is Enterprise/Team-only and does NOT expose image-to-material, so Substance is effectively non-automatable for this web app — use it only as a manual quality benchmark.",
+      "Replicate has no strong native PBR-estimation model (only the old, low-quality tommoore515/pix2pix_tf_albedo2pbrmaps and midllle/material-maker). Best to use the user's Replicate key for the UPSCALE stage and as a host for self-hosted open models (CHORD/StableMaterials/SuperMat), not for core estimation.",
+      "Academic SOTA to track/self-host: MatE (arXiv:2512.18312, Dec 2025) is purpose-built for 'one casual photo → tileable PBR' with depth-based rectification + illumination invariance — likely to beat PATINA on real non-flat photos once weights ship; SuperMat (ICCV 2025) gives millisecond delighting ideal for a free/preview tier; DualMat/ControlMat/MatFusion round out the diffusion-SVBRDF lineage.",
+      "Height/displacement MUST be 16-bit (PNG16/EXR) for UE5 — this rules out the JPEG-only paths (Poly base, Polycam) for the height map even though they conveniently include AO. Poly Pro (8K, 32-bit, royalty-free) is the best of the browser tools but has no documented public API.",
+      "Recommended self-hostable delighting insurance in front of any flat-swatch model: RGB↔X (github.com/zheng95z/rgbx, public code) or the free ccareaga/Intrinsic HF Space to strip lighting before deriving Normal/Rough/Height/AO."
+    ]
+  },
+  {
+    "key": "seamless-tiling",
+    "label": "Seamless tiling",
+    "summary": "Seamless-tiling approaches for an uploaded PBR texture.",
+    "options": [
+      {
+        "name": "Offset + heal (numpy.roll)",
+        "what": "Roll by half size with wrap so edges meet centrally; repair the one seam. Same shift per map, key to PBR-correctness.",
+        "url": "https://www.rendernode.com/creating-seamless-tileable-textures-in-photoshop/",
+        "maturity": "mature",
+        "pricing": "free (numpy/opencv)"
+      },
+      {
+        "name": "img2texture (pip, MIT)",
+        "what": "image_to_seamless with overlap blends wrapped edges. MIT, vendor-safe; cross-fade softens detail.",
+        "url": "https://github.com/rtmigo/img2texture",
+        "maturity": "mature",
+        "pricing": "free"
+      },
+      {
+        "name": "Poisson blend (cv2.seamlessClone)",
+        "what": "Gradient-domain blend hides tonal seams; safe on albedo, risky on roughness/metallic.",
+        "url": "https://learnopencv.com/seamless-cloning-using-opencv-python-cpp/",
+        "maturity": "mature",
+        "pricing": "free"
+      },
+      {
+        "name": "Image Quilting / GraphCut / PatchMatch",
+        "what": "Min-error cut copies real pixels, no blur, best for structured textures. Deterministic cut replays across maps.",
+        "url": "http://jmecom.github.io/projects/computational-photography/texture-synthesis/",
+        "maturity": "mature",
+        "pricing": "free"
+      },
+      {
+        "name": "SDXL circular-padding tiling",
+        "what": "Conv2d padding_mode=circular plus low-denoise img2img so edges wrap. ComfyUI spinagon or diffusers patch.",
+        "url": "https://github.com/spinagon/ComfyUI-seamless-tiling",
+        "maturity": "production-ready",
+        "pricing": "free self-hosted"
+      }
+    ],
+    "recommendation": "HYBRID, detection-gated, GEOMETRIC-FIRST so PBR-correctness is guaranteed. DETECT on the albedo map: fast numpy edge-wrap RMSE/SSIM then textile-metric 0-1; skip the seam stage if >~0.8. DEFAULT FIX runs LAST, after all maps are derived, so one identical operation hits every map: np.roll offset then min-error-boundary image quilting or GraphCut (no blur, preserves detail) for structured/regular textures, falling back to img2texture cross-fade or cv2.seamlessClone for stochastic ones; apply the SAME roll and SAME seam cut/mask to albedo, normal, roughness, metallic, height, AO. AI ENHANCE tier for ugly seams: SD1.5/SDXL circular padding (ComfyUI spinagon Seamless Tile + Circular VAE Decode, or a diffusers conv monkey-patch) at low denoise 0.2-0.4 on the ALBEDO ONLY, then re-derive the other maps; or AI-inpaint only the seam band (sagieppel, brick2face) and copy that band identically into all maps. Hosted: replicate/seamless-texture ~0.017 USD/run (verify init-image support). Premium SOTA: Tiled Diffusion (CVPR 2025). AVOID FLUX for the guarantee -- no circular conv padding, seamless LoRAs (gokaygokay smlstxtr, prithivMLmods) leave seams; use FLUX for look then a geometric pass. Golden rule: never generate PBR maps independently per channel for tiling.",
+    "keyTakeaways": [
+      "PBR-correctness is the hard constraint: the seam fix must be ONE identical transform across all maps. Classical/geometric (np.roll offset + a fixed seam cut/mask) guarantees this; per-map AI generation breaks cross-map correlation. Fix the seam LAST and replay per map, or fix albedo only and re-derive the rest.",
+      "Detect and gate cheaply: numpy edge-wrap RMSE/SSIM plus textile-metric (pip install textile-metric, CVPR 2024, github.com/crp94/textile) 0-1 tileability score; skip the seam stage when >~0.8 and reuse it to QA/rank fixes.",
+      "Best AI lever = SD1.5/SDXL circular padding (Asymmetric Tiling): Conv2d padding_mode=circular in UNet+VAE, low-denoise img2img via the A1111 Tiling checkbox, ComfyUI spinagon nodes, or a diffusers patch; independent X/Y. FLUX has no equivalent and its seamless LoRAs leave seams. Seam-only inpaint (sagieppel, brick2face) minimizes hallucination.",
+      "Tradeoff: classical gives fidelity + guaranteed PBR consistency but can blur/repeat on structured textures (image quilting/GraphCut copy real pixels and avoid blur); AI fixes ugly seams and invents content but drifts. Hosted shortcut replicate/seamless-texture (~0.017 USD/run, verify img2img); SOTA Tiled Diffusion (CVPR 2025, github.com/madaror/tiled-diffusion)."
+    ]
+  },
+  {
+    "key": "classification",
+    "label": "Material classification",
+    "summary": "For the \"understand the uploaded image\" stage you actually need TWO different jobs, and they have different best tools as of 2026.\n\nJOB 1 — Material category + physical PBR hints (wood/metal/stone/etc, is-metallic, is-glossy, has-height). JOB 2 — Quality/suitability gating (flat top-down vs perspective photo, resolution, already-tileable?, watermark/copyright risk).\n\nThe single most important, well-evidenced finding: zero-shot vision models are surprisingly WEAK at fine-grained material recognition. A 2026 arXiv study measured CLIP at 38% and GPT-4V at ~43% on a 21-class material benchmark (DMS-test), while a fine-tuned SigLIP/DINOv2-class model reaches 89-92% on comparable sets. So you should NOT rely on a vision LLM alone to name the material. The winning architecture is a HYBRID: a tiny dedicated material classifier (SigLIP2, ~93M params, runs in well under a second on a HF Inference Endpoint or a Replicate cog) produces the hard material label + confidence, and a cheap vision LLM (Gemini Flash-class via OpenRouter) does the open-ended reasoning the classifier can't — geometry/perspective judgment, glossiness/wetness/metalness hints, watermark/text spotting, and emitting the final structured JSON. Both are cheap enough (well under $0.001/image for the LLM) that you run them on every upload.\n\nResolution, EXIF and a frequency/FFT-based tileability pre-check are pure CPU/Sharp work you do in a Supabase edge function or the Vercel server — do NOT burn an LLM call on facts a library returns deterministically. Reserve the LLM for perceptual judgments only.\n\nThe classifier's output should be a single strict JSON object (schema below) that becomes the contract driving the rest of the pipeline: seamless-tiling, PBR map derivation defaults, upscaler choice, and a hard gate that can reject perspective photos / watermarked / low-res inputs before you spend money on 4K generation.",
+    "options": [
+      {
+        "name": "Gemini 2.5 Flash-Lite (OpenRouter)",
+        "what": "Cheapest current-gen multimodal LLM for the perceptual-judgment + JSON-emit role. Handles perspective-vs-flat, gloss/metalness/wetness hints, watermark/logo/text spotting, and outputs the final structured JSON. Native structured-output (JSON schema) support.",
+        "url": "https://openrouter.ai/google/gemini-2.5-flash-lite",
+        "maturity": "production-ready",
+        "pricing": "$0.10 /M input tokens, $0.40 /M output. Gemini tiles images at 258 tokens per 768x768 tile. A downscaled ~768px analysis thumbnail = 1 tile = 258 input tokens ~= $0.0000258; with a ~400-token JSON reply (~$0.00016) total is ~$0.0002/image. Even at full 4096px (~36 tiles, ~9300 tokens) it's ~$0.0011/image.",
+        "pros": [
+          "Cheapest viable vision LLM on OpenRouter",
+          "1M context, native JSON-schema structured output",
+          "One call returns ALL of JOB-2 plus the soft material hints",
+          "Trivial integration (OpenAI-compatible endpoint)"
+        ],
+        "cons": [
+          "Weakest reasoning of the Gemini tier (Intelligence Index ~13) — fine for classification, not for hard fine-grained material naming",
+          "Preview/lite tiers can change; pin a dated slug in prod",
+          "Do NOT trust it as the sole material namer (see arXiv 38-43% zero-shot finding)"
+        ]
+      },
+      {
+        "name": "Gemini 3.1 Flash Lite (OpenRouter)",
+        "what": "The 2026 current-generation step up from 2.5 Flash-Lite. Use this if 2.5 Flash-Lite's judgment on tricky perspective/material-hint cases proves too weak in eval. Same role: perceptual gating + JSON emit.",
+        "url": "https://openrouter.ai/google/gemini-3.1-flash-lite-preview",
+        "maturity": "production-ready (preview slug exists; stable slug google/gemini-3.1-flash-lite)",
+        "pricing": "$0.25 /M input, $1.50 /M output. ~2.5x the 2.5-Lite cost; still ~$0.0005/image on a 768px thumbnail. Cheaper than full Gemini 3 Flash ($0.50/$3).",
+        "pros": [
+          "Newer, materially better reasoning than 2.5-Lite",
+          "Still very cheap per image",
+          "Same 1M context + structured output"
+        ],
+        "cons": [
+          "~2.5x cost of 2.5-Lite for a job that 2.5-Lite usually handles",
+          "Preview slug may be deprecated — prefer the stable google/gemini-3.1-flash-lite once GA in your account"
+        ]
+      },
+      {
+        "name": "prithivMLmods/Minc-Materials-23 (dedicated material classifier)",
+        "what": "THE recommended primary material namer. SigLIP2-base (google/siglip2-base-patch16-224) fine-tuned on the MINC-2500 dataset to classify 23 surface materials. Outputs a clean label + softmax confidence you can threshold. This is the high-accuracy backbone the arXiv study's findings point to (fine-tuned SigLIP/DINOv2 ~89-92% vs ~40% zero-shot LLM).",
+        "url": "https://huggingface.co/prithivMLmods/Minc-Materials-23",
+        "maturity": "mature / production-ready",
+        "pricing": "Open weights, Apache-2.0. Free to self-host. ~93M params -> runs on CPU in ~100-300ms or near-instant on a small GPU. Host as a HF Inference Endpoint, a Replicate cog, or inside a Supabase/Vercel function with onnxruntime.",
+        "pros": [
+          "23 classes map almost 1:1 to PBR needs: brick, carpet, ceramic, fabric, foliage, food, glass, hair, leather, metal, mirror, painted, paper, plastic, polishedstone, skin, sky, stone, tile, wallpaper, water, wood, other",
+          "Tiny, fast, cheap, deterministic, no per-call API fee",
+          "Gives a real confidence score for gating/fallback",
+          "'polishedstone' vs 'stone' and 'mirror'/'metal'/'glass' splits are directly useful for roughness/metallic defaults"
+        ],
+        "cons": [
+          "Trained on in-context MINC patches, not always flat top-down studio textures — validate on your real inputs and consider a light LoRA/fine-tune on texture-site imagery",
+          "'other' bucket and a few classes (sky/food/skin/hair) are irrelevant to a texture tool — collapse them in post",
+          "Single 224px center view; pair with the LLM hints for materials it confuses"
+        ]
+      },
+      {
+        "name": "Hybrid CLIP zero-shot (fallback only)",
+        "what": "Open-vocabulary CLIP/SigLIP zero-shot scoring against your own label prompts ('a flat seamless texture of {wood|metal|...}'). Useful ONLY as a cheap secondary signal or when you need labels outside the 23-class set.",
+        "url": "https://huggingface.co/docs/transformers/en/tasks/zero_shot_image_classification",
+        "maturity": "mature",
+        "pricing": "Open weights, free to self-host (ViT-L/SigLIP backbones).",
+        "pros": [
+          "Open vocabulary — add new material words without retraining",
+          "Cheap, fast, self-hosted",
+          "Good tie-breaker / ensemble member"
+        ],
+        "cons": [
+          "38% accuracy on 21-class material benchmark in 2026 study — NOT trustworthy as primary",
+          "Sensitive to prompt wording",
+          "Better used as a confidence cross-check than a decision-maker"
+        ]
+      },
+      {
+        "name": "amrul-hzz/watermark_detector (HF)",
+        "what": "ViT-base binary watermark / no-watermark image classifier for the copyright-risk gate. Drop-in transformers pipeline.",
+        "url": "https://huggingface.co/amrul-hzz/watermark_detector",
+        "maturity": "experimental",
+        "pricing": "Open weights, Apache-2.0, free to self-host. 7.6K downloads (most-used HF watermark classifier).",
+        "pros": [
+          "Purpose-built binary signal, trivial pipeline() usage",
+          "Self-hosted, no API cost",
+          "Complements the LLM's text/logo spotting as a second opinion"
+        ],
+        "cons": [
+          "Reported ~65.7% val accuracy — weak; use only as a soft risk flag, not a hard auto-reject",
+          "Better approach: combine this score WITH the Gemini Flash 'visible_text/watermark' boolean and only hard-block on agreement",
+          "Consider also boomb0om/watermark-detectors or a YOLO watermark detector if you need bbox localization"
+        ]
+      },
+      {
+        "name": "TexTile (tileability metric) + FFT pre-check",
+        "what": "For 'is it already tileable?': a deterministic CPU pre-check plus, if you want a learned score, the TexTile differentiable tileability metric. The FFT/edge-wrap check (compare opposite edges + look for seam discontinuity) is enough to set a boolean; TexTile gives a 0-1 tileability score.",
+        "url": "https://arxiv.org/html/2403.12961v1",
+        "maturity": "mature (FFT check) / experimental (TexTile model)",
+        "pricing": "Free — your own CPU code (Sharp/OpenCV/numpy) for the edge-wrap + FFT check; TexTile weights are research-released.",
+        "pros": [
+          "Deterministic, instant, no model call for the basic boolean",
+          "Edge-wrap discontinuity test directly answers 'needs seamless step or not'",
+          "TexTile can later double as a quality gate on your OWN seamless output"
+        ],
+        "cons": [
+          "A pure FFT check gives a heuristic, not a guarantee — keep a confidence band",
+          "TexTile is research code; budget integration time if you adopt it"
+        ]
+      }
+    ],
+    "recommendation": "Use a two-track HYBRID and merge into one JSON contract. Do not pick a single model.\n\nTRACK A — deterministic, no LLM (Supabase edge function / Vercel server, Sharp + onnxruntime):\n1) Read pixels/EXIF -> width, height, megapixels, aspect, file format, alpha. Gate: reject < ~512px (won't upscale cleanly to 4K), flag non-square.\n2) Edge-wrap + FFT seam check -> is_tileable boolean + score. Decides whether the seamless step is needed.\n3) Run Minc-Materials-23 (SigLIP2) -> material_label + confidence. This is your PRIMARY material name (fine-tuned ~90% beats zero-shot LLM ~40%).\n4) Run amrul-hzz/watermark_detector -> watermark_probability (soft flag only).\n\nTRACK B — one Gemini 2.5 Flash-Lite call via OpenRouter (model id google/gemini-2.5-flash-lite) on a downscaled ~768px thumbnail, with a strict JSON schema (structured output). It returns: capture_type (flat_top_down | slight_perspective | strong_perspective | product_render | scene_photo), surface physical hints (is_metallic, gloss_level, has_visible_height/relief, is_wet, is_translucent, color_palette, dominant_pattern, scale_hint), visible_text_or_logo bool + watermark_suspected bool, a material_guess + confidence (used to CONFIRM or override Track A — if they disagree, lower overall confidence and route to manual/secondary), and a one-line reason. Cost ~$0.0002/image.\n\nMERGE: a small deterministic reconciler combines both into the final JSON (schema in key takeaways). Material = Track A label unless low confidence, then defer to Track B agreement. Physical hints come from Track B but are sanity-clamped by the material class (e.g. metal -> metallic=1.0, roughness 0.1-0.4; polishedstone/mirror -> low roughness; fabric/foliage/concrete -> metallic=0, higher roughness, height detail likely). These defaults seed the PBR-map derivation stage.\n\nGATING: hard-reject only on strong_perspective OR scene_photo OR megapixels too low OR (watermark_detector high AND Gemini watermark_suspected). Everything else passes with warnings.\n\nCost at scale: ~$0.0002-0.0011 per image for the LLM, plus near-zero self-hosted classifier compute. Pin dated model slugs in prod; keep Gemini 3.1 Flash Lite (google/gemini-3.1-flash-lite) as the upgrade lever if eval shows 2.5-Lite mis-judging perspective/material hints. Validate Minc-Materials-23 on real texture-site images and fine-tune a small LoRA if accuracy on flat studio textures lags — its MINC training data is in-context photos, not top-down tiles.",
+    "keyTakeaways": [
+      "Zero-shot vision LLMs are WEAK at material naming (CLIP 38%, GPT-4V ~43% on 21-class DMS-test in a 2026 arXiv study) vs fine-tuned SigLIP/DINOv2 at 89-92%. => Use a dedicated classifier for the material label, LLM only for reasoning. Source: arxiv.org/html/2603.17390",
+      "Primary material classifier: prithivMLmods/Minc-Materials-23 — SigLIP2-base, ~93M params, Apache-2.0, 23 MINC classes (brick, carpet, ceramic, fabric, foliage, glass, leather, metal, mirror, painted, paper, plastic, polishedstone, skin, stone, tile, wallpaper, water, wood, + others). Self-host free, sub-second.",
+      "Cheapest viable vision LLM = google/gemini-2.5-flash-lite on OpenRouter: $0.10/M in, $0.40/M out. Gemini bills images at 258 tokens per 768x768 tile, so a 768px analysis thumbnail is ~258 input tokens; with a ~400-token JSON answer the full classify call is ~$0.0002/image. Upgrade lever: google/gemini-3.1-flash-lite ($0.25/$1.50).",
+      "Per-image LLM cost stays under ~$0.001 even at 4096px (~36 tiles). Always send a DOWNSCALED thumbnail for classification — full-res buys no accuracy for material/geometry judgments and costs ~5x more.",
+      "Watermark gate: amrul-hzz/watermark_detector (ViT-base binary, 7.6K downloads) but only ~65.7% accuracy — treat as a SOFT flag; hard-reject only when it AND the Gemini 'watermark_suspected' boolean agree.",
+      "Tileability + resolution + EXIF are deterministic CPU work (Sharp/numpy FFT edge-wrap check) — do them in a Supabase edge fn / Vercel route, never via an LLM. TexTile (arxiv 2403.12961) is an optional learned 0-1 tileability score and can later QA your own seamless output.",
+      "Recommended output JSON contract (drives the whole pipeline): { material: {category, confidence, secondary_guess}, physical: {is_metallic:0-1, roughness_range:[lo,hi], gloss_level, has_height_relief:bool, is_wet:bool, is_translucent:bool, color_palette:[hex], dominant_pattern, scale_hint}, capture: {type: flat_top_down|slight_perspective|strong_perspective|product_render|scene_photo, needs_perspective_correction:bool}, quality: {width,height,megapixels,aspect,is_square,is_tileable:bool,tileability_score, upscale_factor_to_4k}, risk: {watermark_suspected:bool, visible_text_or_logo:bool, watermark_prob}, gate: {decision: accept|warn|reject, reasons:[...]}, pipeline_hints: {needs_seamless:bool, suggested_maps:[basecolor,normal,roughness,metallic,height,ao,...], pbr_defaults:{...}} }",
+      "Physical hints from the LLM must be CLAMPED by the material class to make PBR defaults reliable: metal=>metallic 1.0 / roughness 0.1-0.4; polishedstone/mirror=>very low roughness; fabric/foliage/concrete/brick=>metallic 0 / higher roughness / height detail likely; glass/water=>translucent flag. These seed the PBR-derivation stage defaults.",
+      "Architecture fit for the user's stack: classifier + watermark model as HF Inference Endpoints or Replicate cogs; deterministic checks + the OpenRouter call inside Supabase edge functions or a Vercel serverless route; store the JSON contract row in Supabase Postgres keyed to the uploaded asset so downstream stages read one source of truth."
+    ]
+  },
+  {
+    "key": "upscale-4k",
+    "label": "4K upscaling",
+    "summary": "For a \"upload one image -> 4K UE5 PBR set\" pipeline, upscaling is best done as TWO different operations, not one: (1) a creative/detail-synthesizing upscale on the ALBEDO/diffuse only, and (2) cheap deterministic interpolation (bicubic/lanczos) or GAN upscale on the data maps (normal, roughness, metallic, height, AO). The single most important finding from 2025-2026 research (MUJICA, arXiv:2508.09802; PBR-SR, arXiv:2506.02846) is that running a diffusion/creative upscaler independently per-map BREAKS cross-map consistency and produces wrong shading under varying light — and that metallic maps in particular have no exploitable texture pattern (often near-constant), so they must never be AI-hallucinated. This dictates the architecture: derive the full PBR set FIRST at source resolution (or upscale only the albedo first), then upscale each map with a method appropriate to its physical meaning. Diffusion upscalers (SUPIR, Clarity, SeeSR, CCSR, Topaz Wonder/Bloom) are excellent for the color/albedo channel where invented micro-detail reads as \"more texture,\" but are physically wrong for normal/roughness/metallic. For those, prefer a deterministic GAN (Aura-SR v2, Real-ESRGAN) or plain Lanczos/bicubic, and ALWAYS re-tile after upscaling because AI upscalers do not preserve seamless edges by default (wrap the image, or upscale with circular padding / a tiled-diffusion seam pass). The market splits cleanly into: cheap deterministic GAN upscalers ($0.004-0.095/img: Real-ESRGAN, Aura-SR, Recraft Crisp, Pruna), mid creative diffusion upscalers ($0.012-0.05/MP: Clarity, SeeSR, CCSR), high-end fidelity (SUPIR ~$0.04-0.41/run depending on deployment; Topaz API $0.03-0.82/img), and the no-API-but-best-quality desktop tier (Topaz Gigapixel Pro). For a 4K (and 8K) texture SaaS the sweet spot is Clarity/SUPIR for albedo + Real-ESRGAN/Aura-SR or Lanczos for data maps, all behind Replicate or fal.",
+    "options": [
+      {
+        "name": "philz1337x/clarity-upscaler (Replicate) / fal-ai/clarity-upscaler (fal)",
+        "what": "The de-facto 'Magnific-style' creative upscaler: SD1.5 + ControlNet-Tile + upscale LoRA, tiled internally so it can reach 4K-8K. Best choice for the ALBEDO/diffuse channel where you WANT it to synthesize believable high-frequency surface detail (pores, grain, fibers). Controllable via creativity / resemblance / dynamic params so you can dial hallucination down to stay faithful to the source material. NOT for normal/roughness/metallic.",
+        "url": "https://replicate.com/philz1337x/clarity-upscaler",
+        "pricing": "Replicate: ~$0.017/run (about 58 runs per $1) on A100-40GB, ~15s. fal: $0.03 per megapixel (a 4K 16.7MP output ~ $0.50/run). philz1337x/clarity-pro-upscaler is the premium variant (up to 16x, capped ~8K).",
+        "maturity": "production-ready / mature (most-used community upscaler 2024-2026)",
+        "pros": [
+          "Cheapest creative upscaler on Replicate per run",
+          "Tunable creativity vs fidelity (critical to avoid over-hallucination on materials)",
+          "Internally tiled -> handles 4K/8K",
+          "Both Replicate and fal endpoints; easy to swap"
+        ],
+        "cons": [
+          "SD1.5 base can invent detail that drifts from source if creativity too high",
+          "Does NOT preserve seamless tiling edges -> must re-tile after",
+          "Per-MP pricing on fal makes 8K runs add up",
+          "Not physically valid for data maps"
+        ]
+      },
+      {
+        "name": "cjwbw/supir (Replicate) / fal-ai/supir / clarityai SUPIR",
+        "what": "SOTA open-source restoration+upscale (diffusion + LLaVA captioning). Highest perceptual fidelity for the albedo/color channel and for cleaning up a low-quality user upload before deriving maps. Widely cited as beating Magnific/Topaz on realism. Use as the premium albedo upscaler when input quality is poor.",
+        "url": "https://replicate.com/cjwbw/supir",
+        "pricing": "Replicate varies hugely by deployment: one runs ~$0.054/run, another ~$0.41/run (~2 runs/$1). Segmind also hosts it. Pick the cheaper deployment for batch.",
+        "maturity": "SOTA / production-ready (open weights)",
+        "pros": [
+          "Top-tier realism and detail restoration",
+          "Open source (can self-host on H100/A100/L40S to cut cost at scale)",
+          "Great for restoring a noisy/compressed user upload"
+        ],
+        "cons": [
+          "Heavy + slow + VRAM-hungry; cost varies 8x across Replicate deployments",
+          "Diffusion = hallucination risk; albedo-only, never data maps",
+          "Edges not seam-safe -> re-tile after",
+          "Overkill for already-clean inputs"
+        ]
+      },
+      {
+        "name": "zsxkib/aura-sr-v2 (Replicate)",
+        "what": "GAN-based (GigaGAN) 4x upscaler. DETERMINISTIC, no diffusion hallucination -> this is the recommended upscaler for DATA maps (normal, roughness, AO) when you want better-than-bicubic edges without inventing physically wrong detail. Also a good fast albedo option for clean inputs.",
+        "url": "https://replicate.com/zsxkib/aura-sr-v2",
+        "pricing": "~$0.095/run (about 10 runs per $1) on Replicate.",
+        "maturity": "production-ready / mature",
+        "pros": [
+          "Deterministic GAN = no invented faces/detail; safer for normal/roughness",
+          "Fixed clean 4x",
+          "Good on compression artifacts (user uploads are often JPEG)"
+        ],
+        "cons": [
+          "Fixed 4x only (need a 2nd pass or pre-scale for arbitrary targets)",
+          "GANs can still sharpen normals in ways that alter shading -> validate, or fall back to Lanczos for the most safety-critical maps",
+          "Edges not seam-safe by default"
+        ]
+      },
+      {
+        "name": "nightmareai/real-esrgan (Replicate) / fal-ai/esrgan (fal)",
+        "what": "The workhorse cheap GAN upscaler (Real-ESRGAN / 4x). Fast, runs on cheap GPUs, deterministic. Good default for data maps and for high-volume/cheap-tier albedo. fal's video-upscaler is literally Real-ESRGAN per frame. ESRGAN variants (4x-UltraSharp, Remacri, NMKD) are the community texture favorites if self-hosting.",
+        "url": "https://replicate.com/nightmareai/real-esrgan",
+        "pricing": "Replicate: a few cents/run on cheap GPU (cheapest tier). fal-ai/esrgan: output-based, sub-cent to low-cent per image.",
+        "maturity": "mature (industry standard since 2021, still the baseline)",
+        "pros": [
+          "Very cheap and fast; ideal for batch upscaling 5+ data maps per asset",
+          "Deterministic; no hallucination",
+          "Huge ecosystem of texture-tuned ESRGAN weights (UltraSharp, Remacri) for self-host",
+          "Optional face-enhance can be turned OFF (you want it off for textures)"
+        ],
+        "cons": [
+          "Older; softer than diffusion on albedo micro-detail",
+          "Can over-smooth or introduce mild artifacts on high-frequency grain",
+          "Not seam-aware"
+        ]
+      },
+      {
+        "name": "topazlabs/image-upscale (Replicate) + Topaz Labs API (developer.topazlabs.com)",
+        "what": "Topaz's models exposed as an API. Replicate slug topazlabs/image-upscale offers 5 variants: Standard V2, Low Resolution V2, CGI (great for clean synthetic/3D-looking textures), High Fidelity V2 (preserves detail, least hallucination), Text Refine. Up to 6x, up to 512MP. The direct Topaz API exposes Gigapixel (precision/faithful), Wonder (generative), Bloom (creative). 'High Fidelity'/Gigapixel modes are the faithful ones suitable for textures.",
+        "url": "https://replicate.com/topazlabs/image-upscale",
+        "pricing": "Replicate topazlabs/image-upscale: ~$0.05-$0.82 per image by output-MP tier ($0.03 per 1024x1024 baseline). Direct Topaz API: credit-based (see developer.topazlabs.com/credit-calculator). Desktop Gigapixel Pro is subscription ($499/yr Pro) and the highest quality but no per-call API.",
+        "maturity": "production-ready (API GA 2025) / desktop is SOTA-faithful",
+        "pros": [
+          "Multiple faithful modes (High Fidelity, CGI, Gigapixel) tuned to NOT hallucinate -> usable on more than just albedo",
+          "Up to 6x and very high output MP (good 8K path)",
+          "Reputable quality; CGI mode suits clean tileable materials"
+        ],
+        "cons": [
+          "Most expensive per image at high MP ($0.82 top tier)",
+          "Subscription-first for desktop; API credits less transparent",
+          "Still not seam-aware"
+        ]
+      },
+      {
+        "name": "cswry/seesr (SeeSR) and csslc/CCSR (CCSRv2) on Replicate",
+        "what": "Two 2024-2026 academic real-world SR diffusion models. SeeSR (CVPR2024) is semantics-aware (degradation-aware prompt extractor + SD2.1) -> robust on degraded real uploads, 4x. CCSRv2 (TIP2026) is engineered specifically for CONTENT CONSISTENCY and low stochasticity -> less hallucination than vanilla diffusion, faster, more stable detail. CCSR is a strong middle ground between GAN (too soft) and SUPIR/Clarity (too inventive) for albedo.",
+        "url": "https://replicate.com/cswry/seesr",
+        "pricing": "SeeSR ~$0.12/run (8 runs per $1) on L40S, ~125s. CCSR similar diffusion cost tier (check csslc/ccsr deployment).",
+        "maturity": "mature research -> production-usable; CCSRv2 is current SOTA for consistency",
+        "pros": [
+          "CCSRv2 explicitly minimizes stochastic hallucination = safer for material albedo than Clarity/SUPIR",
+          "SeeSR robust to heavy degradation (JPEG, blur) in user uploads",
+          "Open weights, self-hostable"
+        ],
+        "cons": [
+          "Slower than GANs (SeeSR ~2min/run)",
+          "Still diffusion -> albedo only, not data maps",
+          "Fewer turnkey params than Clarity; more integration work"
+        ]
+      },
+      {
+        "name": "recraft-ai/recraft-crisp-upscale (Replicate/fal) and recraft-creative-upscale",
+        "what": "Crisp = sharpen/clean upscaler explicitly marketed as 'no hallucinated details' and 'print-ready' -> the safest cloud option when you need a faithful upscale of a map and want zero invented content. Creative variant adds detail (albedo only). Extremely cheap.",
+        "url": "https://fal.ai/models/fal-ai/recraft/upscale/crisp",
+        "pricing": "~$0.004 per image (fal & WaveSpeed); Replicate ~$0.02/image tier. Among the cheapest available.",
+        "maturity": "production-ready",
+        "pros": [
+          "Explicit no-hallucination design -> good fallback for data maps and conservative albedo",
+          "Dirt cheap ($0.004/img) -> negligible cost even for 6-map sets",
+          "Multi-host (Replicate, fal, WaveSpeed, kie.ai)"
+        ],
+        "cons": [
+          "Closed model; less control over scale/output cap",
+          "'Crisp' is sharpening-grade, not a true detail synthesizer -> won't add micro-detail like Clarity/SUPIR",
+          "Not seam-aware"
+        ]
+      },
+      {
+        "name": "Tiling-aware / seamless re-tiling layer (Tiled Diffusion arXiv:2412.15185, MaTi, D5 'Make Seamless', circular-pad upscale)",
+        "what": "Not a single product but the REQUIRED post-step: standard upscalers do not keep texture edges seamless. Options: (a) wrap-pad the image (offset by 50%, upscale, crop) so seams sit in the interior; (b) use Tiled Diffusion / FSTD which enforces tileability while upscaling; (c) MaTi-style seam inpainting; (d) D5/Scenario 'Make Seamless' tools that preserve roughness/metallic while fixing edges. Run a wrap-around consistency check after upscale and re-fix seams if broken.",
+        "url": "https://arxiv.org/html/2412.15185v1",
+        "pricing": "Free (algorithmic) if you implement wrap-pad/offset tiling yourself in the edge function; Tiled Diffusion adds normal diffusion-step cost if used.",
+        "maturity": "mature technique (wrap-pad) + active research (Tiled Diffusion 2024-2025)",
+        "pros": [
+          "Guarantees the seamless property survives 4K/8K upscale -> non-negotiable for UE5 tiling materials",
+          "Wrap-pad/offset trick is free and model-agnostic (works around ANY upscaler)",
+          "Preserves the seamless work done earlier in your pipeline"
+        ],
+        "cons": [
+          "Adds an extra processing pass and seam-verification logic",
+          "Full Tiled Diffusion is heavier than a simple wrap-pad",
+          "Per-map: must apply identical crop/offset to ALL maps to keep them aligned"
+        ]
+      }
+    ],
+    "recommendation": "Architecture: derive the PBR maps at source/native resolution FIRST (or upscale ONLY the albedo first to feed map-derivation), then upscale per-map with method matched to physical meaning, then re-tile. Concretely, behind Replicate + fal (both keyed):\n\n1) ALBEDO/diffuse (the only map that should get creative AI detail): default to philz1337x/clarity-upscaler ($0.017/run, tunable creativity ~0.3-0.4 to stay faithful). For low-quality/degraded uploads, upgrade to cjwbw/supir (pick the ~$0.05 deployment) or use csslc/CCSRv2 when you want extra content-consistency with less hallucination. Target 4x to 4096, optional 2nd pass to 8K.\n\n2) NORMAL, ROUGHNESS, METALLIC, HEIGHT, AO (must stay physically correct, NO hallucination): do NOT run a diffusion upscaler per-map — MUJICA/PBR-SR show this breaks cross-map consistency and metallic has no real detail to invent. Use deterministic upscaling: Lanczos/bicubic for the safest maps (metallic especially — or just nearest/bicubic since it's near-constant), and zsxkib/aura-sr-v2 ($0.095) or nightmareai/real-esrgan for normal/roughness/AO where you want crisper-than-bicubic edges. Even cheaper conservative option: recraft-crisp-upscale ($0.004/img) which is explicitly non-hallucinating. Re-normalize the normal map (renormalize RGB->unit vectors) after any upscale, and re-derive height->normal if you have a height map rather than upscaling the normal directly. BEST PRACTICE: derive normal/roughness from the already-upscaled high-res albedo (PBRify_Remix approach: upscale albedo, then generate normal/roughness/height from the 4K albedo) — this gives true 4K data maps without ever AI-upscaling a data map.\n\n3) SEAMLESS RE-TILE (mandatory): AI upscalers destroy tileable edges. After upscaling, run a wrap-pad/offset-tiling pass (offset 50%, fix the now-interior seam, crop back) applied IDENTICALLY across all maps, or use Tiled Diffusion for the albedo. Verify with a wrap-around edge check.\n\nCost per 4K asset (albedo via Clarity + 5 data maps via Lanczos/Real-ESRGAN + retile) lands around $0.02-0.10 — cheap enough to offer 4K free-ish and reserve SUPIR/Topaz High-Fidelity + 8K for a paid tier. Use Topaz API (High Fidelity/CGI) or desktop Gigapixel Pro only as a premium quality upsell, not the default, due to cost. Keep both Replicate and fal slugs wired so you can fail over and price-shop (fal is per-MP, Replicate is per-run).",
+    "keyTakeaways": [
+      "CRITICAL: never run a diffusion/creative upscaler independently on normal/roughness/metallic maps — 2025-2026 research (MUJICA arXiv:2508.09802, PBR-SR arXiv:2506.02846) proves per-map AI upscaling breaks cross-map consistency and yields wrong shading under varying light; metallic maps have no real detail and must never be hallucinated.",
+      "Split the upscale by map type: creative diffusion (Clarity/SUPIR/CCSR) for ALBEDO only; deterministic GAN (Aura-SR v2, Real-ESRGAN) or Lanczos/bicubic for normal/roughness/metallic/AO/height. Renormalize normals after any resize.",
+      "Best ordering: upscale the ALBEDO first, then DERIVE the other maps from the 4K albedo (PBRify_Remix pattern) — this yields genuine 4K data maps with zero data-map hallucination, instead of upscaling already-derived data maps.",
+      "Tiling is NOT preserved by any upscaler by default — a seam-fix re-tile pass (wrap-pad/offset crop, or Tiled Diffusion arXiv:2412.15185) is mandatory after upscaling and must be applied identically across every map so channels stay aligned.",
+      "Exact slugs + 2026 pricing: philz1337x/clarity-upscaler ~$0.017/run (fal $0.03/MP); cjwbw/supir $0.054-$0.41/run (deployment-dependent); zsxkib/aura-sr-v2 $0.095 (GAN, deterministic); nightmareai/real-esrgan few cents (cheap GAN baseline); cswry/seesr ~$0.12/run; csslc/CCSRv2 (best consistency diffusion); recraft-ai/recraft-crisp-upscale $0.004/img (non-hallucinating); topazlabs/image-upscale $0.05-$0.82/img (5 modes, up to 6x/512MP).",
+      "For 8K: Clarity-pro (up to 16x, ~8K cap) or Topaz (up to 6x, 512MP) or a two-pass 4x+2x with Aura-SR/Real-ESRGAN; gate 8K behind a paid tier due to per-MP cost.",
+      "Cost-optimal default per 4K asset (~$0.02-0.10): Clarity albedo + Lanczos/Real-ESRGAN data maps + free wrap-pad retile; reserve SUPIR / Topaz High-Fidelity / 8K as premium upsell. Wire BOTH Replicate (per-run) and fal (per-MP) so you can fail over and price-shop.",
+      "Topaz has no transparent cheap PAYG: API is credit-based and desktop Gigapixel Pro is subscription ($499/yr, no per-call API) — quality leader (High Fidelity/CGI/Gigapixel modes are the faithful, low-hallucination ones) but not the right default for a high-volume SaaS.",
+      "Recraft Crisp and CCSRv2 are the 'safety' picks: explicitly low/no-hallucination, so they're good conservative fallbacks for the albedo and the only diffusion-adjacent options you'd consider near data maps.",
+      "Turn OFF face-enhance / GFPGAN / CodeFormer on everything — those are for portraits and will corrupt material textures."
+    ]
+  },
+  {
+    "key": "ue5-pipeline",
+    "label": "UE5 PBR requirements",
+    "summary": "Exact UE5 import requirements for a drop-in 4K PBR set. UE5 consumes maps via a Material/Material Instance; the per-texture import settings (Compression + sRGB) are what make or break the look. Five maps cover the common case: Base Color (sRGB ON), Normal (DirectX/Y- convention, Normalmap compression, sRGB OFF), an ORM packed mask (R=AO, G=Roughness, B=Metallic, Masks compression, sRGB OFF), optional Height/Displacement (grayscale, sRGB OFF, ideally 16-bit), and optional Emissive (sRGB ON). The two biggest gotchas are (1) shipping OpenGL-convention normals into UE's DirectX expectation (green channel inverted -> bumps read as dents) and (2) leaving sRGB ON for ORM/Normal/Height, which corrupts the linear data and throws roughness/metallic/AO off. For a texture-only product, ship a small UE plugin or example .uasset Material + Material Instance so suffixes auto-assign import settings and the maps wire to the right inputs. 4096x4096 is power-of-two and ideal; BC7 vs BC1/BC5/Masks is the compression tradeoff. UDIM/Virtual Texturing is optional and off by default at 4K.",
+    "options": [
+      {
+        "name": "Base Color / Albedo map (_BC or _D)",
+        "what": "The diffuse color UE5 plugs into the Base Color material input. This is the ONLY map (besides Emissive) that is true color data and must be gamma-encoded.",
+        "maturity": "production-ready",
+        "pricing": "n/a",
+        "pros": [
+          "sRGB = ON (checked). This is the default UE auto-applies when 'sRGB' isn't suppressed.",
+          "Compression Settings = Default (DXT1/BC1 if no alpha, DXT5/BC3 if alpha). Use BC7 (Compression='BC7') for higher-fidelity, near-lossless color at ~1 byte/px.",
+          "8-bit per channel is sufficient; PNG or TGA both fine.",
+          "Should NOT bake in lighting/AO/shadows — keep it flat albedo so UE lighting drives it. PBR albedo should sit roughly in the 30-240 sRGB range (no pure black/white)."
+        ],
+        "cons": [
+          "If sRGB is accidentally OFF, colors look washed out / too dark because the gamma curve is dropped."
+        ]
+      },
+      {
+        "name": "Normal map (_N) — DirectX (Y-) convention",
+        "what": "Tangent-space surface detail. UE5 expects DirectX-style normals (Y- / green channel pointing down). Plugs into the Normal input.",
+        "maturity": "production-ready",
+        "pricing": "n/a",
+        "pros": [
+          "Compression Settings = Normalmap (BC5 on DX11/DX12 — two-channel, reconstructs blue/Z in-shader; highest normal quality). sRGB = OFF (auto-disabled by Normalmap compression).",
+          "UE auto-detects the word 'Normal'/'_N' in the filename and sets Normalmap compression + sRGB off + TextureGroup WorldNormalMap on import.",
+          "If you generate OpenGL normals, either flip the green channel at export OR tick the 'Flip Green Channel' import checkbox in UE so it becomes DirectX. Generating DirectX directly is cleanest.",
+          "If channel-packing a normal into an RGB(A) texture you must use BC7 + sRGB off (BC5 is 2-channel only)."
+        ],
+        "cons": [
+          "BIGGEST GOTCHA: OpenGL convention (Y+) imported as-is -> green channel inverted -> raised bumps read as indentations, lighting looks wrong only on sloped/vertical detail. Flip green to fix.",
+          "Never leave sRGB ON on a normal map — it corrupts the vector data and breaks lighting."
+        ]
+      },
+      {
+        "name": "ORM packed mask (_ORM) — R=AO, G=Roughness, B=Metallic",
+        "what": "The industry/glTF-style packed map UE5 uses to feed three scalar inputs from one texture: R->Ambient Occlusion, G->Roughness, B->Metallic. All three are linear data.",
+        "maturity": "production-ready",
+        "pricing": "n/a",
+        "pros": [
+          "Compression Settings = Masks (BC1/BC7 variant that disables sRGB and treats each channel independently — Epic's documented choice for packed masks). sRGB = OFF (mandatory). For best quality use 'Masks' or BC7.",
+          "In the material, sample the ORM and split channels: R->AO, G->Roughness, B->Metallic. (Epic/glTF order. Some pipelines use _RMA = R-Rough, G-Metal, B-AO — pick ONE and document it; ORM is the more common UE convention.)",
+          "Saves memory and texture samplers vs three separate maps.",
+          "8-bit per channel is fine for roughness/metallic/AO."
+        ],
+        "cons": [
+          "GOTCHA: leaving sRGB ON shifts the roughness/metallic/AO values along the gamma curve -> surfaces look too rough or wrong metallic response. Epic explicitly says disable sRGB when packing masks.",
+          "Channel-order mistakes (RMA vs ORM) silently swap roughness/metallic — verify against the Material's channel wiring.",
+          "Metallic should be near-binary (0 or 1) for most materials; intermediate grays usually indicate a bad map."
+        ]
+      },
+      {
+        "name": "Height / Displacement map (_H or _D-disp)",
+        "what": "Grayscale elevation. Used for Nanite tessellation/displacement (UE5.3+/5.4+), parallax occlusion mapping, or as a height blend mask. Plugs into the material Displacement input (Nanite) or POM node.",
+        "maturity": "mature (POM); experimental→maturing (Nanite tessellation, 5.4+)",
+        "pricing": "n/a",
+        "pros": [
+          "sRGB = OFF (linear). Compression = Default works, but for displacement prefer high precision: import a 16-bit grayscale (PNG-16 or EXR) and consider 'Grayscale' or a 16-bit/HDR-friendly compression to avoid stair-stepping/banding.",
+          "Nanite tessellation (UE5.4): add r.Nanite.AllowTessellation=1 and r.Nanite.Tessellation=1 to DefaultEngine.ini, then tick 'Enable Tessellation' in the material details to unlock the Displacement input; feed the height map and a Displacement Magnitude (and center/midpoint at 0.5 so the surface pushes both in and out).",
+          "Nanite only tessellates to the triangle density the current pixel needs, so texel-density cost is adaptive."
+        ],
+        "cons": [
+          "8-bit height causes visible terracing on strong displacement — ship 16-bit for displacement-grade height.",
+          "Nanite tessellation is performance-heavy and still flagged experimental; default magnitude too high looks like spikes. Provide a sane default magnitude.",
+          "Not every project uses height — make it optional."
+        ]
+      },
+      {
+        "name": "Emissive map (_E) — optional",
+        "what": "Self-illumination color fed into the Emissive Color input, usually multiplied by an intensity scalar.",
+        "maturity": "production-ready",
+        "pricing": "n/a",
+        "pros": [
+          "sRGB = ON (it is color data). Compression = Default/BC7.",
+          "Multiply by an EmissiveIntensity scalar parameter in the material so users can push values >1 for bloom/lumen.",
+          "Only ship when the material actually emits; otherwise omit to save memory."
+        ],
+        "cons": [
+          "If most materials aren't emissive, including a black emissive map wastes memory — make it conditional."
+        ]
+      },
+      {
+        "name": "Packaging: ship a UE Material + Material Instance (and/or small plugin), not just loose textures",
+        "what": "How to deliver so it 'drops in cleanly'. Options ranked by friction.",
+        "maturity": "production-ready",
+        "pricing": "n/a",
+        "pros": [
+          "BEST for a plugin author: ship a parent Material (M_PBR_Master) exposing Texture parameters (BaseColor, Normal, ORM, Height, Emissive) + scalar params, plus a Material Instance (MI_) per texture set. The MI references the imported textures. This guarantees correct channel wiring and ORM unpacking regardless of the user's skill.",
+          "Use Epic naming so UE auto-assigns import settings: T_ prefix on textures, M_ on materials, MI_ on material instances; suffixes _BC, _N, _ORM, _H, _E. UE keys off _N etc. to auto-set Normalmap compression/sRGB.",
+          "Distribute as a .uasset/.umap inside a content plugin or a downloadable sample project — the user migrates/copies it in. .uasset is engine-version-sensitive, so build against the user's UE version (e.g. 5.4/5.5) or provide per-version packs.",
+          "Minimal fallback: ship the 5 PNG/TGA/EXR files + a one-page import recipe table (compression+sRGB per map) so a user can wire them manually."
+        ],
+        "cons": [
+          ".uasset is NOT forward/back compatible across major UE versions — you must build per engine version or ship source textures + an importer script.",
+          "Loose-textures-only relies on the user setting sRGB/compression correctly — the #1 source of 'looks wrong' bug reports."
+        ]
+      },
+      {
+        "name": "Format, sizing, mips & Virtual Texturing settings",
+        "what": "Container/format and resolution rules for a 4K set.",
+        "maturity": "production-ready",
+        "pricing": "n/a",
+        "pros": [
+          "File formats: PNG (8 or 16-bit, lossless, alpha) and TGA (8/16/32-bit) for color/normal/ORM; EXR or 16-bit PNG for height/displacement that needs precision. UE also imports PSD, BMP, JPG, HDR, DDS, TIFF. Use EXR/HDR only when you truly need >8-bit or float.",
+          "4096x4096 is power-of-two (good). UE requires power-of-two for full mipmap generation and texture streaming — non-PoT textures don't get mips/streaming. Keep Mip Gen Settings = FromTextureGroup (default) so mipmaps are built.",
+          "Virtual Texture Streaming: a per-texture toggle. UE can auto-enable it for textures >= the 'Auto Virtual Texturing Size' (Project Settings > Editor > Texture Import). At 4K it's optional; if you DO enable VT you must also enable 'Enable virtual texture support' in Project Settings (editor restart) and the Material must be flagged to sample virtual textures, or it renders black. For a simple single-material drop-in, leave VT OFF to avoid that gotcha.",
+          "Texel density: aim for a consistent ~5.12 px/cm (512 px/m) baseline; at 4K that tiles cleanly over ~8m before softening. Use a World-Aligned/Tiling material or a UV tiling scalar so users can adjust real-world scale."
+        ],
+        "cons": [
+          "Non-power-of-two (e.g. 4000x4000) silently disables mips+streaming -> aliasing and full-res memory cost. Keep it exactly 4096.",
+          "Turning on Virtual Texturing without the project setting + material flag yields black textures — a classic confusing failure."
+        ]
+      }
+    ],
+    "recommendation": "Standardize on a 5-map set with this exact import recipe and ship it wired into a UE Material + Material Instance.\n\nPer-map import settings (the load-bearing table):\n- T_<name>_BC  -> Compression: Default (or BC7), sRGB: ON\n- T_<name>_N   -> Compression: Normalmap (BC5), sRGB: OFF, DirectX/Y- convention (flip green if your generator is OpenGL)\n- T_<name>_ORM -> Compression: Masks (or BC7), sRGB: OFF, channels R=AO/G=Roughness/B=Metallic\n- T_<name>_H   -> Compression: Default/Grayscale, sRGB: OFF, prefer 16-bit (PNG-16 or EXR)\n- T_<name>_E   -> Compression: Default (or BC7), sRGB: ON  (only when emissive)\n\nDeliverable: a parent Material 'M_PBR_Master' that unpacks ORM and exposes texture+scalar params, plus a per-set Material Instance 'MI_<name>'. Wrap it in a small UE content plugin (or a versioned sample .uasset pack) built against the user's exact UE version (5.4/5.5). Because .uasset is version-locked, ALSO emit the 5 source images (PNG/TGA + EXR for height) and a one-line import manifest so users on other versions can re-import with correct settings. Keep resolution exactly 4096x4096 (power-of-two -> mips + streaming), Mip Gen = FromTextureGroup, and leave Virtual Texturing OFF by default at 4K to avoid the black-texture trap.\n\nGenerate DirectX normals and disable sRGB on Normal/ORM/Height at the source so the output is correct even if a user imports the raw files by hand — that single discipline eliminates the two most common 'looks wrong in UE5' failures.",
+    "keyTakeaways": [
+      "UE5 normals are DirectX / Y- (green channel down). OpenGL normals imported as-is make bumps look like dents — generate DirectX or tick 'Flip Green Channel' on import. This is the #1 gotcha.",
+      "sRGB must be ON only for Base Color and Emissive; it must be OFF for Normal, ORM, and Height. Leaving sRGB ON on ORM/Normal/Height corrupts the linear data — the #2 gotcha (roughness/metallic/AO read wrong).",
+      "ORM packing for UE = R:AO, G:Roughness, B:Metallic, imported with Compression=Masks and sRGB OFF. Document RMA-vs-ORM order explicitly so channels don't get swapped.",
+      "Compression per map: Base Color = Default/BC1/BC3 (BC7 for hi-fi), Normal = Normalmap (BC5), ORM = Masks (or BC7), Height = Default/Grayscale (ship 16-bit PNG/EXR for displacement to avoid banding).",
+      "Use Epic naming so UE auto-applies settings: T_ for textures, M_/MI_ for material+instance; suffixes _BC, _N, _ORM, _H, _E. The official 5.7 naming page defines T_/M_/MI_; the _N/_ORM suffixes are the de-facto community standard (Tom Looman) and also drive UE's auto-detect.",
+      "Keep textures exactly 4096x4096 (power-of-two) so mipmaps + streaming work; non-PoT silently disables both. Mip Gen Settings = FromTextureGroup.",
+      "For a true drop-in, ship a parent Material + per-set Material Instance (in a content plugin or versioned .uasset pack) — .uasset is UE-version-locked, so build per the user's version AND also emit the raw images + an import recipe as a fallback.",
+      "Height/displacement: for Nanite tessellation (UE5.4) set r.Nanite.AllowTessellation=1 and r.Nanite.Tessellation=1 in DefaultEngine.ini, tick 'Enable Tessellation' in the material to unlock the Displacement input, feed a 16-bit grayscale height with a sane Displacement Magnitude and 0.5 center. It's experimental and perf-heavy — make it optional.",
+      "Virtual Texturing is OFF-by-default and optional at 4K; if enabled it requires the project-level 'Enable virtual texture support' (editor restart) AND the material flagged to sample VT, or textures render black. Skip it for a simple single-material product.",
+      "File formats: PNG/TGA (8-bit) for color/normal/ORM; EXR or 16-bit PNG for precision height/displacement. EXR/HDR only when you genuinely need >8-bit/float.",
+      "Texel-density guidance: target ~512 px/m (5.12 px/cm) and expose a UV tiling / World-Aligned scalar so users set real-world scale; at 4K this tiles cleanly to ~8m.",
+      "Authoritative sources: Epic naming-conventions (5.7), Epic mobile-textures sRGB rule ('enabled on all texture maps except Normal Maps and Masks'), Epic Using-Texture-Masks (disable sRGB when packing masks), Epic Virtual-Texturing settings, Epic Nanite tessellation community tutorial, plus Tom Looman's naming guide and techarthub's compression guide."
+    ]
+  },
+  {
+    "key": "providers",
+    "label": "Providers & pricing",
+    "summary": "Provider-to-step map for the 4K UE5 PBR pipeline, 2026. Full step assignment and costs in recommendation.",
+    "options": [
+      {
+        "name": "Replicate (PRIMARY)",
+        "what": "The only supplied key that can do real texture work: tiling, PBR-map decomposition (via deployed OSS), 4K upscale."
+      },
+      {
+        "name": "OpenRouter (classify/reason)",
+        "what": "Cheap VLM gateway for material classification and prompt building."
+      },
+      {
+        "name": "Higgsfield (NOT for PBR)",
+        "what": "Creative image/video gen only, no PBR/seamless; keep out of the core path."
+      },
+      {
+        "name": "PBRify_Remix (deploy on Replicate)",
+        "what": "Free CC0 OSS chain that fills the PBR-decomposition gap (Normal/Roughness/Height)."
+      },
+      {
+        "name": "Supabase (orchestrator)",
+        "what": "Postgres/Auth/Storage/Edge Functions; runs the job state machine and Replicate webhook receiver."
+      },
+      {
+        "name": "Vercel (frontend)",
+        "what": "Hosts the Next.js UI; long GPU jobs must be async via Replicate+Supabase."
+      },
+      {
+        "name": "Hugging Face MCP",
+        "what": "SOTA material-model discovery (MatE, MaterialMVP) and secondary GPU host."
+      },
+      {
+        "name": "Pixa MCP (fallback)",
+        "what": "Generic upscale/edit fallback; no PBR decomposition or tiling."
+      }
+    ],
+    "recommendation": "WHICH PROVIDER DOES WHICH STEP (primary then fallback), with per-texture cost:\n\n1) UPLOAD/AUTH/STORAGE: Supabase (Auth, Storage, jobs table); UI on Vercel (Next.js). Infra-fixed.\n2) CLASSIFY MATERIAL: OpenRouter google/gemini-2.5-flash-lite (primary, $0.10/$0.40 per 1M tokens, images billed as input tokens so ~$0.0001/image); fallback google/gemini-2.5-flash ($0.30/$2.50). A free vision tier (200 req/day) covers dev. <$0.001.\n3) SEAMLESS/TILEABLE: Replicate (primary) - clarity-upscaler with pattern-tiling, or a tileable SD/Flux deploy; fallback Pixa edit pipeline. ~$0.02-0.05.\n4) DERIVE FULL PBR SET (albedo/normal/roughness/metallic/height/AO): deploy the CC0 PBRify_Remix on Replicate for normal/roughness/height (primary); derive metallic from the Gemini classification, AO from height. Higher-quality fallback: host MatE or MaterialMVP on Hugging Face Inference Endpoints. No turnkey hosted PBR-set API exists in 2026. ~$0.02-0.05.\n5) UPSCALE TO 4K: Replicate (primary) - clarity-upscaler (~$0.018/run) or SUPIR/CCSR on A100, run per-map; fallback Pixa upscale, or Higgsfield/Nano Banana Pro 4K only if a fully synthetic albedo is wanted. ~$0.03-0.10.\n6) PACK/EXPORT FOR UE5: pure code in a Supabase Edge Function - assemble Base Color, Normal (mind DirectX vs OpenGL green-channel flip), a packed ORM map (Occlusion-Roughness-Metallic, the UE5 convention), and Height; zip to Storage, return a signed URL. Infra-fixed.\n\nORCHESTRATION: a Supabase Edge Function fires Replicate predictions with webhook callbacks (async, never polling); each callback advances the state machine. Keep all long GPU work on Replicate/HF, never inline in Vercel/Supabase functions (timeouts).\n\nREPLICATE BILLING: public models bill active GPU time only (T4 $0.81/hr, L40S $3.51/hr, A100-80GB $5.04/hr, H100 $5.49/hr); private/custom deployments bill boot+idle+active, ~10x on a cold start - favor public models or keep-warm.\n\nALL-IN PER 4K SET: ~$0.08-0.20 in GPU/API (classify sub-cent, tiling ~$0.03, decomposition ~$0.03, 4K upscale ~$0.05-0.10) plus fixed Supabase/Vercel infra. Budget ~$0.15-0.25/texture with retries.\n\nDROP HIGGSFIELD FROM THE CORE PATH: no PBR capability and pricier/less predictable per 4K image than Replicate; keep it and Pixa only as synthetic-albedo or fallback-upscale sources. Replicate is the indispensable key, OpenRouter is the cheap brain, Supabase/Vercel are the rails, Hugging Face is model sourcing and a secondary host.",
+    "keyTakeaways": [
+      "Only REPLICATE does the texture work (tiling, PBR decomposition, 4K upscale); OpenRouter is the classify brain; Higgsfield has zero PBR capability and stays out of the core pipeline.",
+      "No turnkey single-image-to-PBR-set API exists in 2026; self-host CC0 PBRify_Remix (normal/roughness/height) on Replicate, MatE/MaterialMVP on Hugging Face as fallback; derive metallic via VLM and AO from height.",
+      "Replicate public models bill active GPU time only (T4 0.81, L40S 3.51, A100-80GB 5.04, H100 5.49 per hr); private deployments bill boot+idle+active (~10x cold). Use async webhooks, not polling.",
+      "Classification is near-free: gemini-2.5-flash-lite at $0.10/$0.40 per 1M tokens is under a cent per classify; a free vision tier (200/day) covers dev.",
+      "All-in cost ~$0.08-0.20 per 4K PBR set (budget $0.15-0.25 with retries), dominated by the 4K upscale.",
+      "MCP rails: Supabase orchestrates (auth/storage/Postgres/webhook receiver), Vercel is frontend, Hugging Face is discovery/secondary host, Pixa is optional fallback; long GPU work stays on Replicate/HF.",
+      "UE5 export is pure code: Base Color, Normal (mind DirectX vs OpenGL green channel), a packed ORM map (Occlusion-Roughness-Metallic), and Height, zipped in a Supabase Edge Function."
+    ]
+  },
+  {
+    "key": "web-architecture",
+    "label": "Web app architecture",
+    "summary": "For an upload -> long-running multi-model generation -> download app in 2026, the architecture must solve one hard constraint: the pipeline (classify -> seamless -> derive PBR maps -> upscale to 4K -> pack) takes 30s to several minutes across multiple GPU calls, and NO serverless request can stay open that long. Vercel functions cap at 300s (Hobby/Fluid) to ~800s (Pro); Supabase Edge Functions cap at ~150-400s. A naive request/response, or 'run the whole pipeline inside one function', will time out. The winning 2026 pattern: thin frontend on Vercel (Next.js App Router) -> enqueue a job -> a DURABLE ORCHESTRATOR runs the pipeline as discrete checkpointed steps, calling Replicate in ASYNC mode (returns immediately, notifies via webhook) -> each step writes state + progress to Postgres -> the client watches progress via Supabase Realtime (websocket) -> the final 4K maps are zipped and served from object storage via a signed URL behind a CDN. The single biggest 2026 fact shaping infra choices: Replicate was acquired by Cloudflare (announced late 2025, closed early 2026), making a Cloudflare-aligned stack (Replicate GPU + R2 zero-egress storage + Workers/CDN) strategically coherent, though the Replicate API is unchanged for now. For a SOLO FOUNDER optimizing for low ops and speed-to-ship, lean on the connected MCPs: Vercel (frontend + thin API), Supabase (Postgres + Auth + Storage + Realtime + the job state machine), and a purpose-built durable workflow engine (Trigger.dev) for the long-running orchestration that Vercel functions cannot hold open. Keep workers THIN: Replicate (and Higgsfield/Pixa) do the GPU heavy lifting; the orchestrator just sequences steps, handles retries/idempotency, and updates state. Higgsfield/Pixa MCPs are useful as model providers/upscalers inside steps but should be wrapped behind the same async job, never called inline from a web request.",
+    "options": [
+      {
+        "name": "Next.js 15 App Router (on Vercel) — frontend + thin API/BFF",
+        "what": "The frontend shell: upload form, dashboard, job status page, download page, billing UI. App Router with React Server Components for fast initial loads; client components only for the interactive 3D preview and live progress. API Route Handlers act as a thin backend-for-frontend: validate the upload, mint a signed storage URL, create the job row, ENQUEUE to the orchestrator, then return immediately (well under any timeout). They never run the pipeline. Deploy via the connected Vercel MCP.",
+        "maturity": "SOTA / production-ready",
+        "pricing": "Vercel Hobby $0 (non-commercial), Pro $20/user/mo for commercial + usage-based Fluid compute. App is light on Vercel compute since no long work runs there.",
+        "pros": [
+          "First-class Vercel deploy via the connected MCP",
+          "Huge ecosystem; RSC keeps marketing/dashboard pages fast",
+          "Single repo for frontend + thin API",
+          "Built-in streaming UI primitives"
+        ],
+        "cons": [
+          "Functions time out (300s Hobby / 800s Pro even with Fluid compute) — must NOT run the pipeline here",
+          "Commercial use requires Pro",
+          "Vendor pull toward Vercel-native primitives"
+        ],
+        "url": "https://vercel.com/docs/functions/limitations"
+      },
+      {
+        "name": "react-three-fiber + drei + three.js — in-browser 3D PBR preview",
+        "what": "The differentiating UI feature: render generated maps on a rotatable sphere/cube/plane before download so users judge tiling and material response under light. Use meshStandardMaterial (PBR) with map (albedo), normalMap, roughnessMap, metalnessMap, aoMap, displacementMap. drei useTexture loads the set; add an Environment (HDRI/IBL) for realistic reflections, OrbitControls to rotate, and a tiling control (texture.repeat + RepeatWrapping) to prove seamlessness. UE5 uses an ORM-packed map (AO/Roughness/Metallic in R/G/B), so preview from the packed channels to match what ships — this validates the export, not just pretty maps.",
+        "maturity": "SOTA / production-ready",
+        "pricing": "Free / open-source (MIT)",
+        "pros": [
+          "Exact PBR preview in-browser, no native viewer needed",
+          "meshStandardMaterial maps 1:1 to UE5 inputs",
+          "drei removes boilerplate (Environment, OrbitControls, useTexture)",
+          "Lets users verify seamless tiling pre-download — reduces refund complaints"
+        ],
+        "cons": [
+          "4K textures are heavy in-browser — preview at downscaled 1K/2K, offer full 4K only on download",
+          "GPU/VRAM cost on low-end devices",
+          "Channel-packing conventions (UE5 ORM) must be matched or the preview misleads",
+          "Canvas must be client-only (SSR off)"
+        ],
+        "url": "https://r3f.docs.pmnd.rs/tutorials/loading-textures"
+      },
+      {
+        "name": "Trigger.dev (v3/v4) — durable workflow orchestrator (RECOMMENDED for the long-running pipeline)",
+        "what": "The core of the system and the answer to 'where does the multi-minute pipeline run.' Each pipeline stage (classify -> seamless -> derive maps -> upscale -> pack) is a task/step; tasks 'run for as long as you need, with no timeouts.' It checkpoints on waits (waits >5s are checkpointed and do NOT burn compute), so when you kick off a Replicate async prediction and await its webhook/poll you pay nothing while idle. Built-in retries with backoff, concurrency limits (cap parallel GPU jobs to control spend), idempotency keys (dedupe re-submits), per-run logs. Trigger from the Vercel Route Handler with tasks.trigger(); the run id becomes the job id stored in Supabase.",
+        "maturity": "Production-ready / mature",
+        "pricing": "Free $0 ($5 credit, 20 concurrent); Hobby $10/mo ($10 credit, 50 concurrent); Pro $50/mo ($50 credit, 200+ concurrent). Compute $0.0000169–$0.00068/sec + $0.000025/run. Apache-2.0, self-hostable. Idle waits checkpointed (near-zero cost while a 4K upscale runs on Replicate).",
+        "pros": [
+          "No task timeout — purpose-built for exactly this multi-minute, multi-call problem",
+          "Cheapest managed entry ($10 vs Inngest $75 at the paid tier)",
+          "Open-source / self-host escape hatch (Apache-2.0)",
+          "Retries + idempotency + concurrency caps out of the box",
+          "Checkpoint-on-wait means you don't pay for GPU wait time",
+          "Clean typed step-chaining + strong observability for a solo founder"
+        ],
+        "cons": [
+          "One more managed service vs staying 100% in Supabase/Vercel",
+          "Self-hosting is real ops if you go that route",
+          "Event fan-out ergonomics simpler than Inngest's (fine here — this is a linear pipeline)"
+        ],
+        "url": "https://trigger.dev/pricing"
+      },
+      {
+        "name": "Inngest — alternative orchestrator (event-driven, step functions)",
+        "what": "Same job as Trigger.dev but modeled as functions that subscribe to events, with rich step primitives (step.run, step.sleep, fan-out, debounce, priority). Best if you later evolve into an event-driven design where one upload triggers several downstream handlers (generate + thumbnail + analysis + email). First-class Vercel integration (functions deploy as Next.js API routes, Inngest invokes them) — but those invocations still ride Vercel's timeout, so long Replicate awaits must use step.sleep / wait-for-event, not a blocking call.",
+        "maturity": "Production-ready / mature",
+        "pricing": "Free tier (1,000 runs/mo); paid historically from ~$20/mo for 10k runs, with the comparison-cited 'starting' paid tier around $75/mo — notably pricier than Trigger.dev's $10 for a solo founder.",
+        "pros": [
+          "Best-in-class step functions (fan-out, debounce, priority queues)",
+          "Strong first-class Vercel integration",
+          "Excellent for event-driven multi-handler growth",
+          "Durable execution survives restarts"
+        ],
+        "cons": [
+          "Higher entry price than Trigger.dev",
+          "Event model is more concept overhead than a linear pipeline needs today",
+          "Vercel-hosted step bodies still inherit function timeouts (must structure around waits)"
+        ],
+        "url": "https://www.inngest.com/blog/how-to-solve-nextjs-timeouts"
+      },
+      {
+        "name": "Vercel Workflows — alternative orchestrator (Vercel-native durable execution, GA 2026)",
+        "what": "Vercel's own durable-execution model (GA in 2026): mark functions with 'use workflow' / 'use step'; they pause, resume, and keep state for minutes to months, surviving deploys/crashes via deterministic replay. Keeps everything inside the already-wired Vercel account — zero extra vendor. Individual step functions still run as Fluid compute (each STEP stays within compute limits), but the WORKFLOW spanning all steps has no overall duration cap, which is exactly what the pipeline needs.",
+        "maturity": "Production-ready (GA 2026), newer than Trigger.dev/Inngest",
+        "pricing": "Usage-based: pay for Events, Data Written, Data Retained; step functions bill at normal Fluid compute rates. Commercial use sits on the Vercel Pro plan.",
+        "pros": [
+          "No new vendor (already have the Vercel MCP)",
+          "Durable across deploys/crashes",
+          "Native to the deploy target; pause/resume + wait-for-event built in",
+          "Lowest conceptual surface if you're all-in on Vercel"
+        ],
+        "cons": [
+          "Newest of the three (less battle-tested for heavy AI pipelines)",
+          "Deeper Vercel lock-in",
+          "Events/Data pricing dimensions harder to model than Trigger.dev's per-second",
+          "Long Replicate awaits should use wait-for-event so step bodies don't sit burning compute"
+        ],
+        "url": "https://vercel.com/docs/workflows"
+      },
+      {
+        "name": "Supabase Queues (pgmq) + pg_cron + Edge Functions — lowest-vendor orchestrator (budget/consolidation path)",
+        "what": "Stay entirely inside Supabase (connected MCP). pgmq is a Postgres-native, exactly-once, visibility-timeout message queue; pg_cron schedules a worker Edge Function every minute that reads a batch (pgmq.read/read_with_poll), kicks Replicate async predictions, and archives messages. Replicate's webhook (or a poll cron) advances each job's state machine in a Postgres table. Because Replicate is async, the Edge Function only fires-and-forgets (stays under the ~150-400s edge limit). This is the 'no extra SaaS' option for a cost-sensitive launch.",
+        "maturity": "Production-ready (pgmq mature; pattern documented by Supabase)",
+        "pricing": "Included in Supabase (Free, or Pro $25/mo). No separate orchestration bill — strongest cost argument for a solo founder consolidating vendors.",
+        "pros": [
+          "Zero new vendor — queue, cron, worker, DB, auth, storage, realtime all in Supabase",
+          "Exactly-once delivery + visibility window give idempotency/retry primitives",
+          "Everything observable via SQL",
+          "Cheapest possible footprint"
+        ],
+        "cons": [
+          "You hand-roll retries/backoff/step-chaining/observability that Trigger.dev gives free",
+          "Edge Function timeout means workers must be strictly fire-and-forget (never await a multi-minute call)",
+          "pg_cron min granularity ~1 min adds latency",
+          "More bespoke code to maintain solo",
+          "Postgres-Changes realtime fan-out has scaling caveats (prefer Broadcast)"
+        ],
+        "url": "https://supabase.com/blog/processing-large-jobs-with-edge-functions"
+      },
+      {
+        "name": "Replicate (async predictions + webhooks/SSE) — the GPU heavy-lifting layer (keeps workers thin)",
+        "what": "Run every model step here so the orchestrator stays thin: classify, seamless/tiling, PBR-map derivation, and 4K upscale are Replicate predictions (off-the-shelf models or your own packaged with Cog). Create predictions in ASYNC mode (POST without Prefer: wait) — returns a prediction id immediately with status 'starting'; pass webhook + webhook_events_filter:[\"completed\"] so Replicate POSTs your Vercel/edge endpoint on completion (verify the signature). Use SSE for live progress on long single steps if desired. Per-second GPU billing (T4 ~$0.000225/s, A100-80GB ~$0.0014/s, H100 up to ~$0.001525/s) is the metering source of truth for credits. CRITICAL: output files are deleted ~1 hour after completion, so the webhook handler MUST copy outputs to your own storage immediately.",
+        "maturity": "SOTA / production-ready (now a Cloudflare company as of early 2026)",
+        "pricing": "Pay-per-second GPU; CPU from ~$0.000025/s up to ~$0.001525/s (H100). Cold starts on unpopular models add 20-60s of billed GPU time (~$0.02-0.08/run) — pin/warm hot models or use Deployments.",
+        "pros": [
+          "Turns the hard GPU problem into simple HTTP calls (workers stay thin)",
+          "Async + webhooks fit the durable-step pattern perfectly",
+          "Cog packages custom PBR/upscale models",
+          "Cloudflare acquisition aligns it with R2/Workers",
+          "User already has a Replicate key"
+        ],
+        "cons": [
+          "Must copy outputs within ~1h before deletion",
+          "Cold-start cost on niche models",
+          "Per-second cost variance complicates credit pricing",
+          "Acquisition adds some long-term roadmap uncertainty",
+          "Verify webhook signatures or risk spoofed completions"
+        ],
+        "url": "https://replicate.com/docs/topics/predictions/create-a-prediction"
+      },
+      {
+        "name": "Cloudflare R2 — output/asset storage (RECOMMENDED for the multi-file 4K downloads)",
+        "what": "Store inputs and the multi-file 4K PBR sets + the packaged .zip here. ZERO egress fees mean high-volume large downloads (a 4K ORM+normal+albedo+height zip can be 50-150MB+) don't rack up bandwidth charges. S3-compatible API (drop-in with the AWS SDK / presigned URLs); serve downloads via short-lived presigned URLs fronted by Cloudflare's CDN. Strategically aligned now that Replicate is a Cloudflare company.",
+        "maturity": "SOTA / production-ready",
+        "pricing": "Storage ~$0.015/GB-mo; $0 egress (via Workers / S3 API / r2.dev). Free tier available. For download-heavy media ~50-80% cheaper than S3/Supabase egress.",
+        "pros": [
+          "Zero egress = predictable cost as downloads scale",
+          "S3-compatible (presigned URLs, standard tooling)",
+          "Cloudflare CDN in front",
+          "Aligns with the Cloudflare/Replicate direction",
+          "Clean split — public deliverables on R2"
+        ],
+        "cons": [
+          "Separate from Supabase Auth (enforce access by minting short-lived presigned URLs from an authorized API route, not via RLS)",
+          "One more credential/bucket to manage",
+          "Zip packaging is your code (a Worker or an orchestrator step)"
+        ],
+        "url": "https://developers.cloudflare.com/r2/pricing/"
+      },
+      {
+        "name": "Supabase Storage — alternative storage (simplest if you want one vendor)",
+        "what": "Keep inputs/outputs inside Supabase so storage objects inherit Auth + RLS (a user only lists/reads their own assets via policies) and you stay single-vendor with the connected MCP. S3-compatible API since 2024, native signed URLs (createSignedUrl). Good default for authenticated USER inputs even if you later move public/large deliverables to R2.",
+        "maturity": "Production-ready",
+        "pricing": "Pro $25/mo includes 100GB storage + 250GB egress; overage $0.021/GB storage, $0.09/GB egress — egress gets expensive on heavy 4K-zip download traffic.",
+        "pros": [
+          "Tightest integration with DB + Auth (RLS-gated access, no separate authz layer)",
+          "Native signed URLs",
+          "One vendor, one bill, one MCP",
+          "Ideal for private user inputs"
+        ],
+        "cons": [
+          "$0.09/GB egress hurts on large, frequent 4K downloads (the exact workload here)",
+          "For a download-centric product this is the costliest axis vs R2's $0 egress"
+        ],
+        "url": "https://www.buildmvpfast.com/compare/supabase-vs-r2"
+      },
+      {
+        "name": "Supabase Postgres + Auth + Realtime — persistence, identity, job state machine + progress streaming",
+        "what": "The system's backbone (connected MCP). Postgres holds users, credit balances, and a jobs table that IS the pipeline state machine: status (queued/classifying/tiling/deriving/upscaling/packing/done/failed), current_step, progress %, per-step Replicate prediction ids, input/output storage keys, error, idempotency_key. Supabase Auth handles login (RLS scopes every row to its owner). For progress streaming, use Supabase Realtime: the orchestrator/webhook UPDATEs the job row and the browser receives it over a websocket — no polling, no custom SSE server. Prefer Realtime Broadcast over Postgres-Changes at scale (Postgres-Changes does one authz read per subscriber per event).",
+        "maturity": "SOTA / production-ready",
+        "pricing": "Free tier to start; Pro $25/mo (includes DB, Auth, Storage, Realtime, Queues, cron). One bill for most of the backend.",
+        "pros": [
+          "One service covers DB + Auth + Realtime + Storage + Queues (huge ops reduction for a solo founder)",
+          "Realtime gives live progress with ~no extra infra",
+          "RLS enforces per-user isolation",
+          "The jobs table doubles as state machine + audit log",
+          "MCP already connected for migrations/SQL"
+        ],
+        "cons": [
+          "Postgres-Changes realtime has known fan-out scaling limits — use Broadcast for busy channels",
+          "You still need a separate durable orchestrator (Trigger.dev) OR the pgmq/cron pattern for the long-running execution itself",
+          "Storage egress is pricey unless you offload downloads to R2"
+        ],
+        "url": "https://supabase.com/docs/guides/realtime/subscribing-to-database-changes"
+      },
+      {
+        "name": "Stripe Billing — credits + subscriptions metered to GPU cost",
+        "what": "Monetization. Two-layer model fits AI cost best: (1) sell CREDITS / a subscription with included credits; (2) meter actual consumption with Stripe Meters + Meter Events tied to Replicate's per-second GPU billing. Critical pattern for high per-unit GPU cost: PRE-AUTHORIZE — before starting a job, reserve the estimated credit cost against the user's balance (reject if insufficient); after the pipeline finishes, SETTLE against the real metered seconds. Mirrors card preauth and prevents users running expensive 4K upscales they can't pay for. Aggregate usage app-side and flush one meter event per job (not per model call) to stay under rate limits.",
+        "maturity": "SOTA / production-ready",
+        "pricing": "Standard Stripe fees + usage-based billing features; real-time credit burndown and credit-grant automation supported natively in 2026.",
+        "pros": [
+          "Native credit burndown + metered billing + subscriptions in one platform",
+          "preauth/settle maps cleanly to per-second GPU cost so you never lose money on a job",
+          "Meter aggregation keeps you under rate limits",
+          "Well-trodden for AI/SaaS in 2026"
+        ],
+        "cons": [
+          "Reconciling Stripe meters with Replicate per-second cost needs careful estimation (cold starts inflate actuals — pad reservations)",
+          "Usage-based billing adds implementation surface",
+          "Webhook-driven balance updates must be idempotent (store Stripe event ids)"
+        ],
+        "url": "https://docs.stripe.com/billing/subscriptions/usage-based/advanced/about"
+      }
+    ],
+    "recommendation": "CONCRETE STACK for a solo founder (low ops, ship fast, uses the connected MCPs):\n\n1) FRONTEND + THIN API: Next.js 15 App Router on Vercel (deploy via the Vercel MCP). RSC for marketing/dashboard; client components only for the R3F preview and the live progress bar. Route Handlers do exactly three things and return fast: validate the upload, mint a storage URL, create the job row + enqueue. Never run the pipeline in a Vercel function — it will time out (300s Hobby / ~800s Pro).\n\n2) 3D PREVIEW: react-three-fiber + drei + three.js. meshStandardMaterial with map/normalMap/roughnessMap/metalnessMap/aoMap/displacementMap on a sphere+plane, an HDRI Environment for IBL, OrbitControls, and a repeat/RepeatWrapping toggle to prove seamlessness. Preview from the UE5 ORM-packed channels (AO/Rough/Metal = R/G/B) at downscaled 1K-2K; full 4K only on download.\n\n3) ORCHESTRATION (the hard part): Trigger.dev as the durable workflow engine. Model the pipeline as checkpointed steps: classify -> seamless -> derive PBR maps -> upscale 4K -> pack/zip. Tasks have no timeout, idle waits are checkpointed (you don't pay while Replicate runs), and you get retries + idempotency keys + concurrency caps for free. Start on the $10/mo Hobby tier; Apache-2.0 means you can self-host later if cost/lock-in bites. (If you want ZERO extra vendors at launch, the fallback is Supabase Queues/pgmq + pg_cron + an Edge Function worker — same async pattern, more hand-rolled. If you go all-in on Vercel, Vercel Workflows is the native alternative.)\n\n4) GPU: Replicate (user has the key) in ASYNC mode for every model step — POST returns immediately, completion arrives via a signed webhook (filter [\\\"completed\\\"], verify the signature). Keep workers thin: Replicate/Higgsfield/Pixa do the heavy lifting; the orchestrator only sequences and updates state. CRITICAL: Replicate deletes outputs ~1h after completion, so the webhook step must immediately copy maps into your storage.\n\n5) STORAGE: split it. Supabase Storage for authenticated USER INPUTS (RLS-gated, single-vendor simplicity). Cloudflare R2 for the multi-file 4K OUTPUTS + the .zip — zero egress is decisive for a download-heavy product and aligns with Cloudflare now owning Replicate. Serve downloads via short-lived presigned R2 URLs behind the Cloudflare CDN.\n\n6) STATE + AUTH + PROGRESS: Supabase Postgres + Auth + Realtime (MCP connected). A jobs table IS the state machine (status, current_step, progress%, per-step prediction ids, storage keys, idempotency_key). Auth + RLS scope every row to its owner. Push progress to the browser via Supabase Realtime over websockets (use Broadcast, not Postgres-Changes, for busy channels) — no custom SSE/polling server needed.\n\n7) BILLING: Stripe credits/subscription + metered usage. PRE-AUTHORIZE estimated credits before a job, SETTLE against real Replicate per-second cost after; flush one aggregated meter event per job. Pad reservations for cold starts.\n\nWhy this wins for a solo founder: the only services to operate are Vercel + Supabase (both already wired via MCP) + Trigger.dev + Stripe + Replicate keys — five managed accounts, almost no servers. The timeout problem is solved by Trigger.dev's durable steps, not by fighting serverless limits. Workers stay thin because Replicate carries the GPU load. Costs stay controlled via R2 zero-egress, checkpoint-on-wait (no paying for GPU idle), concurrency caps, and Stripe preauth/settle. Fixed floor is roughly $20 (Vercel Pro) + $25 (Supabase Pro) + $10 (Trigger.dev Hobby) ~= $55/mo before variable GPU/storage, with a free-tier path to validate first.\n\nLock-in escape hatches if needed: Trigger.dev is open-source/self-hostable; Replicate models packaged with Cog run anywhere Docker runs; R2 is S3-compatible.",
+    "keyTakeaways": [
+      "THE constraint: a 30s-several-minute multi-model pipeline cannot run inside any serverless request — Vercel caps at 300s (Hobby/Fluid) to ~800s (Pro), Supabase Edge Functions at ~150-400s. The whole architecture exists to move that work off the request path into a durable, checkpointed orchestrator.",
+      "Winning pattern: thin Vercel API enqueues -> durable orchestrator runs checkpointed steps -> each step fires a Replicate ASYNC prediction (returns instantly, completes via signed webhook) -> step copies outputs to storage, updates the Postgres job row -> client watches via a Supabase Realtime websocket. Replicate does GPU; the orchestrator just sequences + retries; workers stay thin.",
+      "Orchestrator pick for a solo founder: Trigger.dev ($10/mo, no task timeout, checkpoint-on-wait so you don't pay during GPU waits, built-in retries/idempotency/concurrency, Apache-2.0 self-host escape). Alternatives: Inngest (better event fan-out but ~$75/mo), Vercel Workflows (native, GA 2026, deepest lock-in), or Supabase Queues+pgmq+cron (zero extra vendor, but you hand-roll retries/observability).",
+      "2026 strategic fact: Cloudflare acquired Replicate (closed early 2026). API unchanged for now, but it makes a Cloudflare-aligned stack (Replicate GPU + R2 zero-egress storage + Workers/CDN) coherent. Hard operational gotcha: Replicate deletes prediction outputs ~1 hour after completion — the webhook handler MUST copy the 4K maps to your storage immediately.",
+      "Storage split beats single-vendor: Supabase Storage for RLS-gated user INPUTS (simple, auth-integrated) + Cloudflare R2 for the heavy multi-file 4K OUTPUTS/zip (zero egress vs Supabase $0.09/GB and S3 — 50-80% cheaper for download-heavy traffic). Serve via short-lived presigned URLs behind a CDN.",
+      "Progress streaming: prefer Supabase Realtime over websockets (orchestrator UPDATEs job row -> browser updates live) instead of building an SSE/polling server. Use Realtime Broadcast rather than Postgres-Changes for busy channels (Postgres-Changes does one authz read per subscriber per event and bottlenecks at scale).",
+      "Billing tied to GPU cost: Stripe credits/subscription + metered usage, with PRE-AUTHORIZE-then-SETTLE — reserve estimated credits before a job (reject if insufficient), settle against real Replicate per-second cost after, and pad for cold starts (20-60s of billed GPU, ~$0.02-0.08/run on niche models). Flush one aggregated meter event per job, not per model call.",
+      "Idempotency + state are non-negotiable: the jobs table in Postgres is the pipeline state machine (status, current_step, progress%, per-step prediction ids, storage keys, idempotency_key). Idempotency keys dedupe re-submitted jobs and replayed webhooks; store Stripe/Replicate event ids to make every webhook handler safe to retry.",
+      "Total ops surface for a solo founder is just Vercel + Supabase (both already connected via MCP) + Trigger.dev + Stripe + Replicate — five managed accounts, near-zero servers. Fixed floor ~$55/mo (Vercel Pro $20 + Supabase Pro $25 + Trigger.dev Hobby $10) before variable GPU/storage, with a free-tier path to validate first.",
+      "Higgsfield and Pixa MCPs are best used AS model providers/upscalers inside orchestrator steps (e.g., Pixa for the 4K upscale, Higgsfield for generative fills), never inline from a web request — wrap them behind the same async job + state machine so they inherit retries, metering, and progress reporting."
+    ]
+  },
+  {
+    "key": "competitors",
+    "label": "Competitive landscape",
+    "summary": "No one owns single-image to seamless true-4K UE5-native (ORM-packed) PBR with an API. White space = UE-native packing + tiling + honest 4K + API + cheap.",
+    "options": [
+      {
+        "name": "WithPoly",
+        "what": "Closest rival: free web app, text/image to seamless tileable PBR (full map set, up to 4K/8K).",
+        "url": "https://withpoly.com",
+        "maturity": "mature",
+        "pricing": "Free; Pro 20 USD/mo.",
+        "pros": [
+          "Full map set, 8K, seamless core, image prompts, free tier"
+        ],
+        "cons": [
+          "No UE ORM packing/.uasset; no public API; seam quality uneven"
+        ]
+      },
+      {
+        "name": "Adobe Substance 3D Sampler 5.x",
+        "what": "Industry-standard image-to-material desktop app; Firefly text/image-to-texture. Quality bar.",
+        "url": "https://www.adobe.com/products/substance3d/apps/sampler.html",
+        "maturity": "SOTA quality",
+        "pricing": "24.99-59.99 USD/mo.",
+        "pros": [
+          "Best seamless accuracy; studio-trusted; clean UE import"
+        ],
+        "cons": [
+          "Desktop+subscription, steep, pricey; no affordable API for a plugin"
+        ]
+      },
+      {
+        "name": "Quixel Megascans / Fab",
+        "what": "Photogrammetry PBR LIBRARY (not a generator) in Epic Launcher; the UE-dev reflex.",
+        "url": "https://quixel.com/megascans",
+        "maturity": "mature",
+        "pricing": "Free in UE/Twinmotion; paid outside.",
+        "pros": [
+          "UE-ready (Bridge, LODs); free in UE; huge library"
+        ],
+        "cons": [
+          "Library not generation; cannot tile your photo; no upload workflow"
+        ]
+      },
+      {
+        "name": "Meshy AI",
+        "what": "Text/image-to-3D-MODEL gen; 4K PBR baked to mesh; strong UE export, real API/MCP.",
+        "url": "https://www.meshy.ai/features/ai-texture-generator",
+        "maturity": "production-ready",
+        "pricing": "Free; Pro 20/mo; Studio 60/mo.",
+        "pros": [
+          "4K PBR; FBX/GLB to UE with slots; REST API + MCP"
+        ],
+        "cons": [
+          "Optimized for objects NOT tiling; baked to mesh; no ORM packing"
+        ]
+      },
+      {
+        "name": "Scenario",
+        "what": "Game-art AI with dedicated texture gen: full PBR set, tileable, 8x upscale, custom styles, public API. Most credible pure-texture rival after WithPoly.",
+        "url": "https://www.scenario.com/features/generate-textures",
+        "maturity": "production-ready",
+        "pricing": "Free; ~28 and ~99 USD/mo.",
+        "pros": [
+          "Full PBR + seamless + 8K; reference image; public API; style training"
+        ],
+        "cons": [
+          "Unity-leaning; no UE ORM packing/Datasmith; studio-priced"
+        ]
+      },
+      {
+        "name": "Build-on: Ubisoft CHORD, MatLat, Tiled Diffusion",
+        "what": "SOTA open research. Ubisoft Generative Base Material (SIGGRAPH Asia 2025): open seamless-tile -> CHORD single-image-to-SVBRDF -> upscale; weights on GitHub, MatSynth on HF. MatLat (Dec 2025) targets 4K. Tiled Diffusion (CVPR 2025) auto seamless. Self-hostable on Replicate/HF.",
+        "url": "https://github.com/ubisoft/ubisoft-laforge-chord",
+        "maturity": "experimental SOTA",
+        "pricing": "Open weights; Replicate/HF GPU cost only.",
+        "pros": [
+          "Open PBR estimation to fine-tune/host (moat); outputs UE-needed maps; fits Replicate+HF"
+        ],
+        "cons": [
+          "Native 512-1024, 4K upscale error accumulation; weak on metallics; GPLv3 diligence"
+        ]
+      }
+    ],
+    "recommendation": "Own the unclaimed slot: ONE photo -> verified-seamless, true-4K, UE5-native PBR in under a minute, for cents, via an API. Five wedges: (1) UE-NATIVE OUTPUT: ORM-packed maps done right (R=AO,G=Roughness,B=Metallic, Linear/Masks, sRGB OFF) + ready UE Material + Datasmith/.uasset; all rivals stop at loose PNGs. (2) TILING SURFACES not models: vs Meshy/Tripo (object-optimized) and converters needing pre-seamless input; Tiled Diffusion/circular-VAE seamlessing + live 3D tiled preview (three.js). (3) HONEST 4K: diffusion is native 512-1024, naive upscale accumulates error; map-aware Real-ESRGAN upscaling, market true-4K-no-mush. (4) API-FIRST: powers the founder NYRA UE plugin (in-editor generate-from-photo) + a B2B line; rivals have no cheap tile/UE-packing API. (5) PRICE: anchors WithPoly 20/mo, Meshy 20-60, Scenario 28-99, Substance 25-60, Megascans free-in-UE; beat with pay-per-texture (cents/4K set on self-hosted compute) + free low-res tier. Moat = self-host/fine-tune Ubisoft CHORD + MatSynth + Tiled-Diffusion on Replicate/HF.",
+    "keyTakeaways": [
+      "No incumbent owns single-photo to seamless to true-4K to UE5-native (ORM-packed) PBR to API. WithPoly/Scenario closest but text-first/Unity-leaning, no UE packing/focused API; Meshy/Tripo model-centric, weak at tiling; Substance/Quixel desktop/library, no cheap API.",
+      "UE-readiness is the sharpest wedge: rivals ship loose maps and leave ORM packing (R=AO,G=Rough,B=Metal) and the sRGB-OFF/Linear-Masks gotcha to the user. Correct packing + UE Material/Datasmith/.uasset is concrete value.",
+      "True 4K is a documented gap: PBR diffusion is native 512-1024, naive upscaling suffers error accumulation (Ubisoft CHORD, MatLat Dec 2025). Map-aware upscaling = real differentiator.",
+      "Build a moat not resell: Ubisoft CHORD/Generative Base Material (SIGGRAPH Asia 2025, GitHub + MatSynth on HF) + Tiled Diffusion (CVPR 2025) self-hosted on Replicate/HF give single-image-to-SVBRDF + AI seamlessing. Caveat: CHORD prototype-grade, weak on metallics.",
+      "Pricing anchors: WithPoly 20/mo, Meshy 20-60, Tripo 15.9-111.9, Scenario 28-99, Substance 24.99-59.99; Megascans-in-UE is the zero anchor. Pay-per-texture (cents/4K set) + free low-res tier undercuts while staying bespoke.",
+      "API-first is product and distribution: image-in -> UE-ready-ORM-set-out REST endpoint powers the founder NYRA UE5 plugin and is a B2B revenue line no rival plugs into cleanly."
+    ]
+  }
+]
