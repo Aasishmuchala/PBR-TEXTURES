@@ -16,6 +16,8 @@ import {
   getReplicateKey,
   hasFalKey,
 } from "@/lib/keys";
+import { downscaleImage } from "@/lib/image";
+import { uploadToFal } from "@/lib/falUpload";
 import type { GenerateOptions, ProcessedSet } from "@/lib/types";
 
 const MaterialPreview3D = dynamic(() => import("@/components/MaterialPreview3D"), {
@@ -72,6 +74,7 @@ export default function Studio() {
   const [aiAvailable, setAiAvailable] = useState(false);
   const [autoLabeling, setAutoLabeling] = useState(false);
   const [inputWarning, setInputWarning] = useState("");
+  const [falUrl, setFalUrl] = useState<string | null>(null);
   const poll = useRef({ cancel: false });
 
   useEffect(() => {
@@ -82,18 +85,18 @@ export default function Studio() {
 
   const falHeaders = (): Record<string, string> => ({ "x-fal-key": getFalKey() });
 
-  function selectImage(f: File) {
+  async function selectImage(f: File) {
     const url = URL.createObjectURL(f);
     setPreview((old) => {
       if (old) URL.revokeObjectURL(old);
       return url;
     });
-    setImage(f);
     setResult(null);
     setError("");
     setStage("idle");
     setInputWarning("");
 
+    // Quality warning is based on the ORIGINAL dimensions.
     const probe = new Image();
     probe.onload = () => {
       const w = probe.naturalWidth;
@@ -106,26 +109,47 @@ export default function Studio() {
     };
     probe.src = url;
 
-    // auto-classify the material straight from the photo
-    void classify(f);
+    setImage(f); // keep the ORIGINAL full-res file
+    setFalUrl(null);
+
+    // Upload full-res straight to fal storage (no 4.5MB cap). If no key yet,
+    // defer to generate and classify via the multipart fallback.
+    const falKey = getFalKey();
+    if (falKey) {
+      try {
+        const u = await uploadToFal(falKey, f);
+        setFalUrl(u);
+        void classify({ url: u });
+        return;
+      } catch (e) {
+        console.error("fal direct upload failed; using downscale fallback:", e);
+      }
+    }
+    void classify({ file: f });
   }
 
-  async function classify(file?: File) {
-    const f = file ?? image;
-    if (!f || !classifyAvailable) return;
+  async function classify(src: { url?: string; file?: File }) {
+    if (!classifyAvailable || (!src.url && !src.file)) return;
     setAutoLabeling(true);
     setError("");
     try {
-      const fd = new FormData();
-      fd.append("image", f);
-      const r = await fetch("/api/autolabel", {
-        method: "POST",
-        headers: {
-          "x-claudeopus-key": getClaudeOpusKey(),
-          "x-openrouter-key": getOpenRouterKey(),
-        },
-        body: fd,
-      });
+      const baseHeaders = {
+        "x-claudeopus-key": getClaudeOpusKey(),
+        "x-openrouter-key": getOpenRouterKey(),
+      };
+      let r: Response;
+      if (src.url) {
+        r = await fetch("/api/autolabel", {
+          method: "POST",
+          headers: { ...baseHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ imageUrl: src.url }),
+        });
+      } else {
+        const small = await downscaleImage(src.file!, 2048, 0.92);
+        const fd = new FormData();
+        fd.append("image", small);
+        r = await fetch("/api/autolabel", { method: "POST", headers: baseHeaders, body: fd });
+      }
       const j = await readJson(r);
       if (j.label) setOptions((o) => ({ ...o, material: j.label }));
       else if (j.error) setError(j.error);
@@ -149,10 +173,31 @@ export default function Studio() {
     poll.current.cancel = false;
 
     try {
-      const fd = new FormData();
-      fd.append("image", image);
-      fd.append("options", JSON.stringify(options));
-      const sub = await fetch("/api/generate", { method: "POST", headers: falHeaders(), body: fd });
+      // Prefer the direct fal URL (full-res, no 4.5MB cap). Upload now if needed.
+      let url = falUrl;
+      if (!url) {
+        try {
+          url = await uploadToFal(getFalKey(), image);
+          setFalUrl(url);
+        } catch (e) {
+          console.error("fal direct upload failed; using downscale fallback:", e);
+        }
+      }
+
+      let sub: Response;
+      if (url) {
+        sub = await fetch("/api/generate", {
+          method: "POST",
+          headers: { ...falHeaders(), "Content-Type": "application/json" },
+          body: JSON.stringify({ imageUrl: url, options }),
+        });
+      } else {
+        const small = await downscaleImage(image, 2048, 0.92);
+        const fd = new FormData();
+        fd.append("image", small);
+        fd.append("options", JSON.stringify(options));
+        sub = await fetch("/api/generate", { method: "POST", headers: falHeaders(), body: fd });
+      }
       const subj = await readJson(sub);
       if (!sub.ok || !subj.requestId) throw new Error(subj.error || "submit failed");
 
@@ -251,7 +296,7 @@ export default function Studio() {
           <OptionsPanel
             options={options}
             setOptions={setOptions}
-            onAutoLabel={() => classify()}
+            onAutoLabel={() => classify(falUrl ? { url: falUrl } : image ? { file: image } : {})}
             autoLabelAvailable={classifyAvailable}
             autoLabeling={autoLabeling}
             aiAvailable={aiAvailable}

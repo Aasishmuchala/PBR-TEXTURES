@@ -11,21 +11,27 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Missing fal key — add it in Settings." }, { status: 401 });
   }
   try {
-    const form = await req.formData();
-    const file = form.get("image");
-    if (!(file instanceof File)) {
-      return NextResponse.json({ error: "No image uploaded" }, { status: 400 });
+    let imageUrl: string;
+    let options: GenerateOptions;
+    if ((req.headers.get("content-type") || "").includes("application/json")) {
+      // Preferred: the browser already uploaded the image to fal; we get a URL.
+      const body = (await req.json()) as { imageUrl?: string; options?: GenerateOptions };
+      if (!body.imageUrl) return NextResponse.json({ error: "No image URL" }, { status: 400 });
+      imageUrl = body.imageUrl;
+      options = body.options as GenerateOptions;
+    } else {
+      // Fallback: multipart file upload (server-side fal upload). <4.5MB only.
+      const form = await req.formData();
+      const file = form.get("image");
+      if (!(file instanceof File)) {
+        return NextResponse.json({ error: "No image uploaded" }, { status: 400 });
+      }
+      options = JSON.parse(String(form.get("options") ?? "{}")) as GenerateOptions;
+      imageUrl = await uploadImage(key, await file.arrayBuffer(), file.name || "input.png", file.type || "image/png");
     }
-    const options = JSON.parse(String(form.get("options") ?? "{}")) as GenerateOptions;
-    if (!options.material) {
+    if (!options?.material) {
       return NextResponse.json({ error: "Missing material label" }, { status: 400 });
     }
-    const imageUrl = await uploadImage(
-      key,
-      await file.arrayBuffer(),
-      file.name || "input.png",
-      file.type || "image/png",
-    );
     const requestId = await submit(key, imageUrl, options);
     return NextResponse.json({ requestId });
   } catch (e) {

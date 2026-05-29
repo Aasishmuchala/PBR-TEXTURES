@@ -51,24 +51,33 @@ export async function POST(req: NextRequest) {
     );
   }
   try {
-    const form = await req.formData();
-    const file = form.get("image");
-    if (!(file instanceof File)) {
-      return NextResponse.json({ error: "No image uploaded" }, { status: 400 });
+    // imageRef is either a public URL (browser uploaded to fal) or a data URL
+    // (multipart fallback). Both work as an OpenAI-style image_url.
+    let imageRef: string;
+    if ((req.headers.get("content-type") || "").includes("application/json")) {
+      const body = (await req.json()) as { imageUrl?: string };
+      if (!body.imageUrl) return NextResponse.json({ error: "No image URL" }, { status: 400 });
+      imageRef = body.imageUrl;
+    } else {
+      const form = await req.formData();
+      const file = form.get("image");
+      if (!(file instanceof File)) {
+        return NextResponse.json({ error: "No image uploaded" }, { status: 400 });
+      }
+      const b64 = Buffer.from(await file.arrayBuffer()).toString("base64");
+      imageRef = `data:${file.type || "image/png"};base64,${b64}`;
     }
-    const b64 = Buffer.from(await file.arrayBuffer()).toString("base64");
-    const dataUrl = `data:${file.type || "image/png"};base64,${b64}`;
 
     // Preferred: claudeopus.pro (retry + opus->sonnet->haiku fallback inside the helper).
     if (coKey) {
       try {
-        const { text, model } = await claudeOpusVision(coKey, PROMPT, dataUrl, 40);
+        const { text, model } = await claudeOpusVision(coKey, PROMPT, imageRef, 40);
         return NextResponse.json({ label: clean(text), via: `claudeopus.pro/${model}` });
       } catch (e) {
         if (!orKey) throw e; // no fallback available
       }
     }
-    const label = clean(await openRouter(orKey, dataUrl));
+    const label = clean(await openRouter(orKey, imageRef));
     return NextResponse.json({ label, via: "openrouter" });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 502 });
