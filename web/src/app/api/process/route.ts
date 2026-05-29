@@ -1,15 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { promises as fs } from "fs";
-import path from "path";
 import { estimateCost, mapUrls, result } from "@/lib/fal";
 import { buildUEMaps, seamlessResizePng, type RawMaps } from "@/lib/pbr";
 import { upscaleBaseColor, upscaleClarity } from "@/lib/replicate";
 import { buildManifest, buildZip, slugify } from "@/lib/ue";
-import { ensureJobDir, newJobId } from "@/lib/jobs";
+import { newJobId } from "@/lib/jobs";
+import { storeOutput } from "@/lib/storage";
 import type { GenerateOptions, ProcessedSet } from "@/lib/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+// 60s = Vercel Hobby cap. Heavy 8K + AI-upscale runs may need Pro (up to 300s).
+export const maxDuration = 60;
 
 type Body = { requestId: string; options: GenerateOptions & { name?: string } };
 
@@ -80,29 +80,21 @@ export async function POST(req: NextRequest) {
     const zip = await buildZip(name, ueMaps, manifest, ext);
 
     const jobId = newJobId(name);
-    const dir = await ensureJobDir(jobId);
-    await Promise.all([
-      fs.writeFile(path.join(dir, bcFile), ueMaps.baseColor),
-      fs.writeFile(path.join(dir, `T_${name}_N.png`), ueMaps.normal),
-      fs.writeFile(path.join(dir, `T_${name}_ORM.png`), ueMaps.orm),
-      fs.writeFile(path.join(dir, `T_${name}_H.png`), ueMaps.height),
-      fs.writeFile(path.join(dir, `${name}_UE.zip`), zip),
+    const [baseColor, normal, orm, height, zipUrl] = await Promise.all([
+      storeOutput(jobId, bcFile, ueMaps.baseColor, ext === "jpg" ? "image/jpeg" : "image/png"),
+      storeOutput(jobId, `T_${name}_N.png`, ueMaps.normal, "image/png"),
+      storeOutput(jobId, `T_${name}_ORM.png`, ueMaps.orm, "image/png"),
+      storeOutput(jobId, `T_${name}_H.png`, ueMaps.height, "image/png"),
+      storeOutput(jobId, `${name}_UE.zip`, zip, "application/zip"),
     ]);
 
-    const fileUrl = (n: string) => `/api/file?job=${jobId}&name=${encodeURIComponent(n)}`;
     const processed: ProcessedSet = {
       name,
       jobId,
       resolution: options.resolution,
       costEstimate: estimateCost(options.resolution),
       zipBytes: zip.length,
-      urls: {
-        baseColor: fileUrl(bcFile),
-        normal: fileUrl(`T_${name}_N.png`),
-        orm: fileUrl(`T_${name}_ORM.png`),
-        height: fileUrl(`T_${name}_H.png`),
-        zip: fileUrl(`${name}_UE.zip`),
-      },
+      urls: { baseColor, normal, orm, height, zip: zipUrl },
       manifest,
     };
     return NextResponse.json(processed);

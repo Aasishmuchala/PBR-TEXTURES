@@ -36,3 +36,5 @@ dev_smoke.*
 Thumbs.db
 .vscode/
 .idea/
+.vercel
+.env*
