@@ -165,7 +165,10 @@ export default function Studio() {
   }
 
   async function runPoll(requestId: string) {
+    const start = Date.now();
     while (!poll.current.cancel) {
+      if (Date.now() - start > 8 * 60 * 1000)
+        throw new Error("Timed out waiting for PATINA (8 min). Please try again.");
       await new Promise((r) => setTimeout(r, 2500));
       if (poll.current.cancel) return;
       const r = await fetch(`/api/status?requestId=${encodeURIComponent(requestId)}`, {

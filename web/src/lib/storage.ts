@@ -18,6 +18,7 @@ export async function storeOutput(
       access: "public",
       contentType,
       addRandomSuffix: false,
+      allowOverwrite: true,
     });
     return url;
   }

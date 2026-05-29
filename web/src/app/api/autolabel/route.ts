@@ -32,8 +32,13 @@ async function openRouter(key: string, dataUrl: string): Promise<string> {
     }),
   });
   if (!r.ok) throw new Error(`openrouter ${r.status} ${(await r.text().catch(() => "")).slice(0, 140)}`);
-  const j = (await r.json()) as { choices?: Array<{ message?: { content?: string } }> };
-  return (j.choices?.[0]?.message?.content ?? "").toString();
+  const j = (await r.json()) as { choices?: Array<{ message?: { content?: unknown } }> };
+  const c = j.choices?.[0]?.message?.content;
+  return typeof c === "string"
+    ? c
+    : Array.isArray(c)
+      ? c.map((p) => (typeof p === "string" ? p : (p as { text?: string })?.text ?? "")).join(" ")
+      : "";
 }
 
 export async function POST(req: NextRequest) {

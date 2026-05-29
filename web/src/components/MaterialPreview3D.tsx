@@ -27,15 +27,17 @@ function PbrMesh({ urls, repeat, shape }: { urls: Urls; repeat: number; shape: "
   const [map, normalMap, orm, height, alpha] = textures;
 
   useLayoutEffect(() => {
+    if (!map) return;
     map.colorSpace = THREE.SRGBColorSpace;
     for (const t of [normalMap, orm, height, alpha]) if (t) t.colorSpace = THREE.NoColorSpace;
     for (const t of textures) {
+      if (!t) continue;
       t.wrapS = t.wrapT = THREE.RepeatWrapping;
       t.repeat.set(repeat, repeat);
       t.anisotropy = 8;
       t.needsUpdate = true;
     }
-  }, [textures, map, normalMap, orm, height, repeat]);
+  }, [textures, map, normalMap, orm, height, alpha, repeat]);
 
   const geometry = useMemo(() => {
     const g =
@@ -44,7 +46,7 @@ function PbrMesh({ urls, repeat, shape }: { urls: Urls; repeat: number; shape: "
         : new THREE.PlaneGeometry(2.4, 2.4, 220, 220);
     // aoMap reads the 2nd UV set on older three; mirror uv -> uv2.
     const uv = g.attributes.uv as THREE.BufferAttribute;
-    g.setAttribute("uv2", new THREE.BufferAttribute(uv.array, 2));
+    g.setAttribute("uv2", new THREE.BufferAttribute((uv.array as Float32Array).slice(), 2));
     return g;
   }, [shape]);
 

@@ -15,9 +15,17 @@ type Body = { requestId: string; options: GenerateOptions & { name?: string } };
 
 async function fetchBuf(url?: string): Promise<Buffer | undefined> {
   if (!url) return undefined;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`download failed (${r.status})`);
-  return Buffer.from(await r.arrayBuffer());
+  try {
+    const r = await fetch(url);
+    if (!r.ok) {
+      console.error(`map download failed (${r.status}): ${url}`);
+      return undefined; // degrade gracefully — buildUEMaps tolerates missing maps
+    }
+    return Buffer.from(await r.arrayBuffer());
+  } catch (e) {
+    console.error("map download error:", e);
+    return undefined;
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -29,6 +37,12 @@ export async function POST(req: NextRequest) {
   try {
     const { requestId, options } = (await req.json()) as Body;
     if (!requestId) return NextResponse.json({ error: "missing requestId" }, { status: 400 });
+
+    // Sanitize untrusted numeric options (prevent absurd allocations / bad input).
+    options.resolution = [2048, 4096, 8192].includes(options.resolution) ? options.resolution : 4096;
+    options.aoStrength = Math.max(0, Math.min(2, Number(options.aoStrength) || 1));
+    options.smoothHeight = Math.max(0, Math.min(4, Number(options.smoothHeight) || 0));
+    options.strength = Math.max(0.3, Math.min(1, Number(options.strength) || 0.75));
 
     const patina = await result(key, requestId);
     const urls = mapUrls(patina);

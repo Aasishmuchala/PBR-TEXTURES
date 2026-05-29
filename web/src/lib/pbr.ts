@@ -174,7 +174,9 @@ async function aoFromHeightRaw(h: Buffer, R: number, strength: number): Promise<
 // 16-bit grayscale PNG (upcast 8->16). Throws if pngjs path fails -> caller falls back.
 function encodeHeight16(h: Buffer, R: number, compress: boolean): Buffer {
   const data = Buffer.alloc(R * R * 2);
-  for (let i = 0; i < R * R; i++) data.writeUInt16BE(Math.min(65535, h[i] * 257), i * 2);
+  // pngjs reads 16-bit samples little-endian on x86/ARM. (Our h*257 upcast
+  // yields equal bytes either way, but LE is the correct/robust choice.)
+  for (let i = 0; i < R * R; i++) data.writeUInt16LE(Math.min(65535, h[i] * 257), i * 2);
   const png = new PNG({ width: R, height: R, colorType: 0, bitDepth: 16, inputColorType: 0, inputHasAlpha: false });
   png.data = data;
   return PNG.sync.write(png, {
@@ -242,7 +244,9 @@ export async function buildUEMaps(maps: RawMaps, opts: BuildOptions): Promise<UE
   // 3. Base Color — unsharp + saturation, then procedural grime/tonal variation.
   let bcPipe = sharp(maps.basecolor).resize(R, R, { fit: "fill" });
   if (opts.enhance) bcPipe = bcPipe.sharpen({ sigma: 1.1 }).modulate({ saturation: 1.06 });
-  const bc = await bcPipe.removeAlpha().raw().toBuffer();
+  // toColourspace("srgb") guarantees 3 channels so the per-pixel grime loop below
+  // never indexes out of bounds (a grayscale source would otherwise be 1-channel).
+  const bc = await bcPipe.removeAlpha().toColourspace("srgb").raw().toBuffer();
   if (opts.enhance && noise) {
     for (let i = 0; i < R * R; i++) {
       const cavity = 1 - heightGray[i] / 255;

@@ -49,11 +49,17 @@ export async function claudeOpusVision(
 
       if (r.ok) {
         const j = (await r.json().catch(() => null)) as {
-          choices?: Array<{ message?: { content?: string } }>;
+          choices?: Array<{ message?: { content?: unknown } }>;
         } | null;
-        const text = j?.choices?.[0]?.message?.content;
-        if (typeof text === "string") return { text: text.trim(), model };
-        lastErr = "unexpected response shape (not OpenAI-style)";
+        const content = j?.choices?.[0]?.message?.content;
+        const text =
+          typeof content === "string"
+            ? content
+            : Array.isArray(content)
+              ? content.map((c) => (typeof c === "string" ? c : (c as { text?: string })?.text ?? "")).join(" ")
+              : "";
+        if (text.trim()) return { text: text.trim(), model };
+        lastErr = "empty/unexpected response shape";
         break; // shape issue won't be fixed by retry — try next model
       }
 
